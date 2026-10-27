@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Translator Android 清单
+
+  ⚠️ 卓易通容器兼容性注意事项（见 docs/DESIGN.md §2.5）：
+  容器会静态分析 AndroidManifest.xml，提取敏感权限与 targetSdkVersion
+  与系统白名单比对；不达标则拒绝分配虚拟化资源、切断系统 API 调用。
+
+  因此这里采取「最小必要声明」策略：
+  - FOREGROUND_SERVICE_MEDIA_PROJECTION 是内放采集的硬需求，
+    但也是容器审计的重点。已如实声明（隐藏反而更危险）
+  - 不申请 SYSTEM_ALERT_WINDOW（悬浮窗改用 Flutter 自身窗口）
+  - 不申请 READ_PHONE_STATE 等容器敏感项
+  - targetSdkVersion 用 34 而非最新，避开容器尚未适配的新 API 门控
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 麦克风：降级路径必需（卓易通容器内内放不可用时靠它） -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!--
+      系统内放捕获走 MediaProjection + AudioPlaybackCapture，
+      **不需要** CAPTURE_AUDIO_OUTPUT（那是签名级权限，普通应用申请
+      必被拒；留着只会在卓易通权限审计里制造噪声）。2026-10-26 删除。
+    -->
+
+    <!-- 前台服务：Android 8+ 后台启动受限，14+ 需类型声明 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
+    <!-- 卓易通容器：请求安装运行环境（首次启动时用户确认） -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"
+        tools:ignore="ProtectedPermissions" />
+
+    <!-- 通知（前台服务必须显示） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:name="${applicationName}"
+        android:allowBackup="false"
+        android:supportsRtl="true">
+
+        <!--
+          必须用自定义 MainActivity 而非直接声明 FlutterActivity：
+          Flutter 3.x 已删除 Android v1 embedding，直接声明会构建失败。
+          MainActivity 继承 FlutterActivity 即使用 v2 embedding。
+
+          ## 屏幕方向（2026-10-26）
+          Manifest 声明 `fullUser` 作为**基线**（平板端即完全可旋转，
+          且尊重用户的自动旋转开关），再由运行时的 OrientationPolicy.kt
+          按设备类型收紧 —— 手机收成锁竖屏。
+          这是 Android 官方指南推荐的做法：静态声明没法区分手机/平板
+          （写死 portrait 平板也被锁死，写 unspecified 系统策略又不可控）。
+            - 手机（sw < 600dp）→ SCREEN_ORIENTATION_PORTRAIT 锁竖屏
+            - 平板（sw >= 600dp）→ SCREEN_ORIENTATION_FULL_USER 可旋转
+            - 折叠屏展开（sw 320→673）→ 自动从手机策略切成平板策略
+
+          ## configChanges
+          含 orientation|screenSize|smallestScreenSize|screenLayout
+          → 旋转/折叠屏展开时 **Activity 不重建**，只重排。
+          ⚠️ 这一条对本项目是硬要求：重建 Activity 会丢 Rust 会话指针，
+          正在进行的转写会全部中断。
+
+          ## resizeableActivity
+          大屏（平板）多窗口支持。Android 16 起大屏设备会忽略方向与
+          尺寸限制，声明 true 与系统行为对齐，也避免被系统按旧规则
+          强制兼容模式缩放。
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@style/LaunchTheme"
+            android:screenOrientation="fullUser"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:resizeableActivity="true"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+
+            <meta-data
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
+        <!--
+          勿删！Flutter 工具靠此 meta-data 判定 embedding 版本。
+          缺失会被误判为已删除的 v1 embedding，构建直接失败
+          （"Build failed due to use of deleted Android v1 embedding"）。
+        -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+
+        <!--
+          采集前台服务：⚠️ 必须与主进程**同进程**（2026-10-26 决策）。
+          Rust 会话指针是主进程地址空间的值，Dart FFI 与 JNI 操作同一份
+          libtranslator_core.so —— 服务若跑在 :capture 独立进程，
+          拿到的 session/handle 整数解引用必然踩空（SIGSEGV）。
+          卓易通容器休眠保活是远期需求，届时改「共享内存 relay」另期设计，
+          不要恢复 android:process。
+        -->
+        <service
+            android:name=".AudioCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection|microphone" />
+
+        <!-- MediaProjection 授权回调 -->
+        <activity
+            android:name=".ProjectionPermissionActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:resizeableActivity="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+    </application>
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT" />
+            <data android:mimeType="text/plain" />
+        </intent>
+    </queries>
+</manifest>

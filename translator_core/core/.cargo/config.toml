@@ -1,0 +1,23 @@
+# Rust 侧 MSVC 静态 CRT 配置
+#
+# 背景：项目链接的两个原生库都要求 /MT 静态 CRT：
+#   1. sherpa-onnx 官方预编译库（static-MT，改不动）
+#   2. Bergamot 依赖树（marian/sentencepiece 原生强制 /MT）
+# Rust 默认 /MD → 链接期 LNK2038「RuntimeLibrary 不匹配」。
+# crt-static 让 Rust 编译产物也走 /MT，全链统一。
+#
+# 注意：这会让产物不依赖 VC Runtime DLL（vcruntime140.dll 等），
+# 对分发是好事（减少依赖），与我们的离线安装器目标一致。
+
+# ⚠️ 2026-10-26：原写法是 `[build] rustflags`（**全 target 生效**），
+# Android 交叉编译（aarch64-linux-android）也会被强加 +crt-static →
+# Rust 产物静态链 bionic，与 sherpa-onnx 官方 Android **shared** 库
+# （libonnxruntime.so 等，内部依赖动态 bionic + libc++）混链时出现
+# 重复符号 / 栈展开跨不过 so 边界的问题。
+# 因此把该 flag 收窄到 Windows MSVC 专属 target 段：
+#   - cargo 规则：`[target.<triple>] rustflags` 只对对应 target 生效
+#   - 环境变量 RUSTFLAGS 优先级高于本节（package.sh 若设置则以它为准）
+# Linux/macOS 桌面（flexaudio）如需静态 CRT 再按各自 target 段追加。
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

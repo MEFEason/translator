@@ -1,0 +1,73 @@
+[15:39:46]   Rust 源码未变、版本一致 → 跳过编译（CARGO_INCREMENTAL 已启用）
+[15:39:47]   复用 DLL 内嵌版本: beta-v0.9.27-build2026.1024.15.31
+[15:39:47] 2/5 构建 Flutter 外壳（release）…
+Flutter assets will be downloaded from https://storage.flutter-io.cn. Make sure you trust this source!
+Resolving dependencies...
+Downloading packages...
+  cross_file 0.3.5+5 (0.4.0 available)
+  file_picker 8.3.7 (13.1.0 available)
+  flutter_lints 3.0.2 (6.0.0 available)
+  lints 3.0.0 (6.1.0 available)
+  material_color_utilities 0.13.0 (0.13.1 available)
+  screen_retriever 0.2.2 (0.3.0 available)
+  test_api 0.7.12 (0.7.15 available)
+  win32 5.15.0 (6.4.0 available)
+Got dependencies!
+8 packages have newer versions incompatible with dependency constraints.
+Try `flutter pub outdated` for more information.
+Building Windows application...                                     9.4s
+√ Built build\windows\x64\runner\Release\translator.exe
+[15:40:00] 3/5 组装到 staging…
+[15:40:03]   版本号: beta-v0.9.27-build2026.1024.15.31  (PE 资源用 0.9.27.1024)
+[15:40:03]   编译安装器…
+Successful compile (41.156 sec). Resulting Setup program filename is:
+C:\Users\Admin\WorkBuddy\代码开发\Translator\dist\Translator-Setup-beta-v0.9.27-build2026.1024.15.31.exe
+  Translator-Setup-stable-2026.1022.14.24.exe Valid
+  Translator-Setup-stable-2026.1022.14.32.exe Valid
+  Translator-Setup-stable-2026.1022.14.45.exe Valid
+[15:41:57]   安装器已签名: /c/Users/Admin/WorkBuddy/代码开发/Translator/dist/
+[15:42:03]   收集插件原生 DLL…
+[15:42:03]     + cnativeapi.dll
+[15:42:03]     + screen_retriever_windows_plugin.dll
+[15:42:03]     + window_manager_plugin.dll
+[15:42:03]   已收集 3 个插件 DLL
+[15:42:03]   OK 产物零 ORT DLL（static 模式）
+[15:42:04]   已收录模型：212M
+[15:42:06] 4/5 验证产物…
+[15:42:07]   文件齐全，SHA256 校验通过
+[15:42:08]   DLL 40 个符号，关键符号齐全
+[15:42:08]   出厂验证（加载真实 DLL + 真实模型自检）…
+[session-stop] 停止 worker 完成
+[INFO] 已加载 C:\Users\Admin\WorkBuddy\代码开发\Translator\.staging\translator_core.dll
+[PASS] 库加载 + 版本: beta-v0.9.27-build2026.1024.15.31
+[PASS] session_create
+[INFO] 自检步骤:
+        lib: ok=True  translator_core 已加载
+        asr: ok=True  模型目录就绪
+        mt: ok=True  权重目录就绪
+        glossary: ok=True  0 个词条
+        capture: ok=True  内放 + 内放
+[INFO] 采集能力: kind=systemAudio sources=['系统内放（WASAPI loopback）', '麦克风'] reason=-
+[PASS] 会话采集能力可用
+[PASS] session_free 幂等
+[结果] 通过 —— 可覆盖 last_good
+[15:42:08]   ✓ 出厂验证通过
+[15:42:08]   签名产物…
+
+=== 签名复核 ===
+  cnativeapi.dll           Valid
+  flutter_windows.dll      Valid
+  screen_retriever_windows_plugin.dll Valid
+  translator.exe           Valid
+  translator_core.dll      Valid
+  window_manager_plugin.dll Valid
+[15:42:29]   签名完成
+[15:42:29] 5/5 发布…
+[15:42:32]   旧产物已备份到 last_good/
+[15:42:37] 
+[15:42:37] 完成。产物在：/c/Users/Admin/WorkBuddy/代码开发/Translator/outputs
+[15:42:37]   可执行文件：99800 bytes
+[15:42:37]   总大小：267M
+[15:42:37]   上一版本：/c/Users/Admin/WorkBuddy/代码开发/Translator/last_good
+[15:42:37] 
+[15:42:37] 运行：双击 /c/Users/Admin/WorkBuddy/代码开发/Translator/outputs/translator.exe

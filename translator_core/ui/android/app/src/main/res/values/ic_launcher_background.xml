@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 图标背景：与 UI 主色一致的深蓝渐变（纯色 + 矢量，无位图） -->
+<resources>
+    <color name="ic_launcher_background">#1B3A6B</color>
+</resources>

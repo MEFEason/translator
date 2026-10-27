@@ -1,0 +1,97 @@
+[package]
+name = "translator-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Translator core: offline realtime ASR + en->zh translation pipeline"
+# FSL-1.1-ALv2 不是标准 SPDX 标识符，Cargo 会拒绝它。
+# 官方做法见 crates.io 文档：填 "SEE LICENSE IN <file>"，并用 license-file 指向原文。
+license = "SEE LICENSE IN ../../LICENSE"
+license-file = "../../LICENSE"
+
+[lib]
+name = "translator_core"
+# cdylib 供 Flutter FFI 使用（产物 translator_core.dll）；rlib 供 Rust 测试与 CLI 使用
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# 词库匹配：Aho-Corasick 自动机
+aho-corasick = "1.1"
+# NFKC 归一化（全角/半角统一），保证三端匹配行为一致
+unicode-normalization = "0.1"
+# 热重载文件监听
+notify = "6.1"
+notify-debouncer-full = "0.3"
+# 无锁环形缓冲（音频生产者/消费者）
+rtrb = "0.3"
+# 时间戳
+once_cell = "1.19"
+# ASR 后端（可选，见 features）
+# default-features = false：crate 默认启用 static 链接，与我们的
+# shared（DLL）方案互斥（build.rs 会 panic "cannot be enabled at the
+# same time"）。shared 由 asr-sherpa feature 显式启用。
+sherpa-onnx = { version = "1.13", optional = true, default-features = false }
+# 翻译后端（可选，见 features）
+# 注意：这里**不引入** Rust 的 `sentencepiece` crate。
+# Bergamot 内部已自带 SentencePiece（通过 C++ 静态库链接），
+# 而 Rust crate 会再编译一份同名库（sentencepiece_train.lib 等），
+# 与 marian 那份符号冲突 → LNK2001「无法解析的外部符号
+# SentencePieceTrainer::Train」。我们通过 csrc/bergamot_c_api.cpp
+# 的 C ABI 直接用 Bergamot，Rust 侧不需要分词器。
+# 桌面端音频捕获：麦克风 + 系统 loopback + 按进程，统一跨平台 API
+flexaudio = { version = "0.6", optional = true }
+
+[features]
+default = []
+# sherpa-onnx ASR 后端。
+# 用 **static** 模式：官方 static-MT 包把 onnxruntime 整份静态编入
+# （onnxruntime.lib 是 916 MB 的真静态库），所以磁盘上**不需要**
+# onnxruntime.dll / sherpa-onnx-c-api.dll 等任何 DLL。
+#
+# 这不只是省几个文件 —— 在磁盘上放一个名为 `onnxruntime.dll` 的新文件
+# 会触发 360 的「修改系统 DLL」报毒（Inno 进程无论 MoveFile 还是
+# FileCopy 都会被拦），而 static 模式让这个文件根本不存在。
+#
+# 代价：二进制体积大（ORT 静态编入），且要解 protobuf 符号冲突
+# （sherpa 自带精简 protobuf-lite，与 Bergamot 依赖树里 sentencepiece
+# 的 protobuf 符号重名）。冲突靠**链接顺序**化解：sentencepiece 的
+# protobuf 先定义，sherpa 的 protobuf.obj 就不会被抽取。
+asr-sherpa = ["dep:sherpa-onnx", "sherpa-onnx/static"]
+# sherpa-onnx ASR 后端 —— **Android 专用：shared 模式**。
+#
+# 为什么 Android 不能走上面的 static：sherpa-onnx-sys 的 build.rs
+# 对 (Static, "android") 直接报 Unsupported target（官方不发 Android
+# 静态包）；而 (Shared, "android") 对应官方 sherpa-onnx-v{-android.tar.bz2
+# （jniLibs/{abi}/ 下是共享库）。磁盘上放 onnxruntime 文件的禁令是
+# Windows 360 误报专项，Android 沙箱隔离不存在该问题，照带。
+#
+# 运行期依赖：libsherpa-onnx-c-api.so + libonnxruntime.so 必须与
+# libtranslator_core.so 一起进 APK jniLibs（build_android.sh 负责拷贝），
+# 链接期由 rpath $ORIGIN 解析。
+# 构建时设 SHERPA_ONNX_LIB_DIR=<android 包>/jniLibs/arm64-v8a 免下载
+# （运行期零网络是产品硬约束，构建期也不依赖临时联网）。
+asr-sherpa-android = ["dep:sherpa-onnx", "sherpa-onnx/shared"]
+# Bergamot 翻译后端（Marian 权重，纯源码编译，离线友好）
+mt-bergamot = []
+# 桌面端采集（Windows WASAPI loopback / macOS CoreAudio taps）
+# 由 flexaudio 提供，已封装为统一 API
+capture-desktop = ["dep:flexaudio"]
+# Android 采集契约（实际 AudioRecord 在 Kotlin 插件侧）
+capture-android = []
+
+[dev-dependencies]
+approx = "0.5"
+
+# 编译 Bergamot 的 C ABI 包装层（csrc/bergamot_c_api.cpp）。
+# 只在 mt-bergamot feature 下使用。
+[build-dependencies]
+cc = "1.8"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+# 注意：不能设 panic = "abort"，那会让 cdylib 在 FFI 边界崩溃时
+# 直接终止宿主进程（Flutter / 桌面应用），无法做错误上报。
+# 跨 FFI 边界必须用 unwind，才能把 panic 转成错误码。
+panic = "unwind"

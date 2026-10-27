@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 应用图标前景：语音波形 + 字幕条，纯矢量无需二进制资源 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 字幕条（底部） -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.95"
+        android:pathData="M30,74 L78,74 A2,2 0 0,1 80,76 L80,79 A2,2 0 0,1 78,81 L30,81 A2,2 0 0,1 28,79 L28,76 A2,2 0 0,1 30,74 Z" />
+
+    <!-- 语音波形（5 根竖条，高度递变） -->
+    <path android:fillColor="#FFFFFF" android:pathData="M38,42 L42,42 L42,62 L38,62 Z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M48,32 L52,32 L52,66 L48,66 Z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M58,26 L62,26 L62,68 L58,68 Z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M68,36 L72,36 L72,64 L68,64 Z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M78,46 L82,46 L82,60 L78,60 Z" />
+
+    <!-- 中间分隔（EN | ZH 隐喻） -->
+    <path android:fillColor="#FFFFFF" android:fillAlpha="0.6"
+        android:pathData="M52,24 L54,24 L54,70 L52,70 Z" />
+</vector>

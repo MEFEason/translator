@@ -1,0 +1,78 @@
+# .gitignore — Translator
+
+# ── 构建产物 ────────────────────────────────────────────────
+Windows/outputs/
+Windows/last_good/
+Windows/dist/
+Windows/.staging-*/
+Windows/.trash/
+Windows/.version.ini
+dist/
+outputs/
+build/
+
+# ── Rust ────────────────────────────────────────────────────
+translator_core/core/target/
+**/*.rs.bk
+*.pdb
+
+# ── Flutter / Dart ──────────────────────────────────────────
+translator_core/ui/.dart_tool/
+translator_core/ui/build/
+translator_core/ui/.flutter-plugins
+translator_core/ui/.flutter-plugins-dependencies
+translator_core/ui/.packages
+translator_core/ui/pubspec.lock
+translator_core/ui/windows/flutter/ephemeral/
+**/.plugin_symlinks/
+# build_windows.sh 的输出目录（Rust DLL 落点）
+translator_core/ui/windows/rust/
+
+# ── Android（实际工程在 translator_core/ui/android/）────────
+translator_core/ui/android/.gradle/
+translator_core/ui/android/build/
+translator_core/ui/android/app/build/
+translator_core/ui/android/local.properties
+translator_core/ui/android/.cxx/
+translator_core/ui/android/app/.cxx/
+translator_core/ui/android/app/src/main/jniLibs/
+Android/.gradle/
+Android/build/
+Android/app/build/
+Android/local.properties
+Android/.cxx/
+*.iml
+
+# ── 基准测试 / 调试残留 ─────────────────────────────────────
+translator_core/bench_*
+translator_core/tts_*
+translator_core/*.wav
+
+# ── 第三方预编译库（体积大，用脚本获取）────────────────────
+translator_core/third_party/sherpa-prebuilt/
+translator_core/third_party/*.tgz
+translator_core/third_party/bergamot-translator/
+translator_core/third_party/pcre2-10.39/
+
+# ── 模型权重（不入库，由用户导入 / 脚本下载）───────────────
+models/
+translator_core/models/
+
+# ── IDE / 系统 ──────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ── 签名材料（绝不入库）────────────────────────────────────
+*.pfx
+*.p12
+*.key
+codesign.cer
+
+# ── 运行日志 / 临时压缩包（核验时发现混入，补拦）────────────
+*.log
+tools/*.zip
+translator_core/ui/*.zip

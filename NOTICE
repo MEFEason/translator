@@ -1,0 +1,140 @@
+Translator — 离线实时字幕翻译系统
+Copyright 2025-2026 MEFEason. All rights reserved.
+
+本产品包含以下第三方组件，其著作权归各自作者所有，
+许可条款详见本目录下的 `THIRD_PARTY_LICENSES/`。
+
+================================================================================
+一、随产物静态链接进 translator_core.dll 的组件
+================================================================================
+
+本项目将下列推理引擎**静态链接**进 `translator_core.dll`（磁盘上不存在
+`onnxruntime.dll` / `sherpa-onnx-*.dll` 等独立 DLL）。静态链接意味着
+这些组件的许可条款**直接适用于**本产品的分发行为。
+
+--------------------------------------------------------------------------------
+1. ONNX Runtime (onnxruntime)
+   用途：ASR / MT 模型的推理引擎
+   许可：MIT License
+   归属：Copyright (c) Microsoft Corporation
+   说明：以静态库形式编入 translator_core.dll
+
+--------------------------------------------------------------------------------
+2. sherpa-onnx
+   用途：流式语音识别（ASR）后端
+   许可：Apache License 2.0
+   归属：Copyright 2023-2024 Sherpa-onnx authors
+   说明：以 static-MT 模式编入 translator_core.dll
+
+--------------------------------------------------------------------------------
+3. Bergamot Translator（Firefox Translations 底层引擎）
+   用途：离线神经机器翻译（MT）后端
+   许可：Mozilla Public License 2.0 (MPL-2.0)
+   归属：Copyright (c) Mozilla Foundation and contributors
+   说明：以静态库形式编入 translator_core.dll
+   ⚠️ MPL-2.0 是**文件级 copyleft**：若修改了 Bergamot 的源文件，
+      修改后的那些文件须以 MPL-2.0 公开源码。本项目未修改 Bergamot 源码，
+      仅以未改动形式编译链接。
+
+--------------------------------------------------------------------------------
+4. SentencePiece（随 Bergamot 静态链接）
+   用途：分词
+   许可：Apache License 2.0
+   归属：Copyright 2018 Google LLC
+
+--------------------------------------------------------------------------------
+5. Marian NMT / intgemm / ruy / dllama（随 Bergamot 静态链接）
+   用途：NMT 推理计算核心
+   许可：MPL-2.0 / Apache-2.0（各组件以其随附许可文件为准）
+   归属：Copyright (c) respective authors
+
+--------------------------------------------------------------------------------
+6. PCRE2
+   用途：正则表达式（随 sherpa-onnx 静态链接）
+   许可：BSD 3-Clause License
+   归属：Copyright (c) 1997-2021 University of Cambridge
+
+--------------------------------------------------------------------------------
+7. protobuf-lite（随 sherpa-onnx 静态链接）
+   用途：模型文件序列化
+   许可：BSD 3-Clause License
+   归属：Copyright 2008 Google Inc.
+
+--------------------------------------------------------------------------------
+8. Rust 依赖 crate（编译期链接进 translator_core.dll）
+   aho-corasick / unicode-normalization / notify / notify-debouncer-full /
+   rtrb / once_cell / flexaudio
+   许可：MIT 或 MIT OR Apache-2.0 双许可（逐 crate 以其 LICENSE 为准）
+
+================================================================================
+二、构建期与运行期依赖的独立组件
+================================================================================
+
+--------------------------------------------------------------------------------
+9. Flutter SDK / Dart Runtime
+   许可：BSD 3-Clause License
+   归属：Copyright 2013 The Flutter Authors
+
+--------------------------------------------------------------------------------
+10. Flutter 插件（编译为 *_plugin.dll，随产物分发）
+     window_manager / screen_retriever_windows / tray_manager /
+     nativeapi / window_manager_plus 等
+     许可：MIT / BSD / Apache-2.0（逐插件以其 LICENSE 为准）
+
+================================================================================
+三、模型权重
+================================================================================
+
+本产品分发时**不含**任何模型权重。用户在应用内自行导入模型包（`.dshm`）。
+模型权重的著作权与许可由各自发布方独立约定，与本项目无关。
+典型模型：
+  - sherpa-onnx zipformer（bilingual zh-en）：Apache-2.0
+  - Bergamot / Marian en-zh 权重：MPL-2.0（随 Bergamot 分发）
+
+================================================================================
+四、获取第三方源码
+================================================================================
+
+本项目使用的全部第三方组件均为公开开源项目，可按下表获取完整源码：
+
+  组件               源码地址
+  ------------------ ------------------------------------------------
+  ONNX Runtime       https://github.com/microsoft/onnxruntime
+  sherpa-onnx        https://github.com/k2-fsa/sherpa-onnx
+  Bergamot           https://github.com/browsermt/bergamot-translator
+  SentencePiece      https://github.com/google/sentencepiece
+  PCRE2              https://github.com/PCRE2Project/pcre2
+  protobuf           https://github.com/protocolbuffers/protobuf
+  Flutter            https://github.com/flutter/flutter
+  Rust crates        https://crates.io
+
+Bergamot 自身含 marian / sentencepiece / dllama 等子模块，
+需执行 `git submodule update --init --recursive` 才能取全。
+
+================================================================================
+五、许可文件位置
+================================================================================
+
+各组件的完整许可原文见：`THIRD_PARTY_LICENSES/`
+
+  ONNX Runtime     MIT License
+  sherpa-onnx      Apache License 2.0
+  Bergamot         Mozilla Public License 2.0
+  PCRE2            BSD 3-Clause License
+  Flutter          BSD 3-Clause License
+
+================================================================================
+六、本项目自身许可
+================================================================================
+
+Translator 本体采用 **Functional Source License, Version 1.1, ALv2 Future
+License (FSL-1.1-ALv2)**，全文见根目录 `LICENSE`。
+
+要点：
+  - 个人使用、学习研究、非商业用途：免费
+  - 内部使用与访问：允许
+  - 面向被许可方的专业服务：允许
+  - **竞争性商业用途**（提供与本软件功能相同或实质相似的商业产品/服务）：不允许
+  - 自本软件发布之日起**满 2 年**后，自动转为 **Apache License 2.0**
+
+MPL-2.0 组件的完整源码提供义务见 https://mozilla.org/MPL/2.0/。

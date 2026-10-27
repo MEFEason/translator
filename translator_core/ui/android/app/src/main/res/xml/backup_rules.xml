@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 不备份：字幕与词库可能含敏感内容，且体积大 -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="."/>
+    <exclude domain="file" path="."/>
+</full-backup-content>

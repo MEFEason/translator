@@ -1,0 +1,50 @@
+name: translator
+description: 跨平台离线实时音频转写翻译（Translator）
+publish_to: 'none'
+version: 0.1.0+1
+# FSL-1.1-ALv2 非标准 SPDX 标识符，pub 会拒绝。
+# 官方做法：填 "SEE LICENSE IN <file>"（pub 仅在发布到 pub.dev 时校验，
+# 本项目 publish_to: 'none' 不发布，保留此写法以备将来）。
+license: "SEE LICENSE IN ../../LICENSE"
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # FFI：调用 translator_core 共享库
+  # 注：不用 flutter_rust_bridge —— 它会传递引入 jni 插件，
+  # 而 jni 只提供 Android 平台实现，会让 `flutter build windows`
+  # 在 generated_plugins.cmake 里找不到 windows 目录而失败。
+  # 当前是手写 dart:ffi 绑定（lib/ffi/bridge.dart），已够用。
+  ffi: ^2.1.3
+  # 状态管理
+  provider: ^6.1.2
+  # 文件选择（导入词库 / 模型包）
+  file_picker: ^8.1.2
+  # 路径
+  path_provider: ^2.1.4
+  path: ^1.9.0
+  # 轻量持久化（记住转写盘位置等设置）
+  shared_preferences: ^2.2.0
+  window_manager: ^0.5.2
+  tray_manager: ^0.8.0
+  win32: ^5.15.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
+  # HarmonyOS Sans SC（华为官方开源字体，SIL OFL 可商用）内置 Regular。
+  # 2026-10-25 用户：「整体字体太难看」—— 旧主题用等宽 monospace
+  # 渲染中文，笔画呆滞；换鸿蒙字体后中英混排观感对齐手机系统级 UI。
+  # 只用 Regular 一个字重：Flutter 对粗体自动合成（fake bold），
+  # 省 8MB 包体。
+  fonts:
+    - family: HarmonyOS Sans SC
+      fonts:
+        - asset: assets/fonts/HarmonyOS_Sans_SC_Regular.ttf
