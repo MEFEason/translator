@@ -97,6 +97,8 @@ Rust 源码未变且版本戳未变时**跳过 cargo build**（全量 5-10 分�
 | `Android/scripts/check_android_env.py` | Android 环境自检 |
 | `scripts/gen_test_wav.py` / `gen_tts_wav.ps1` | 生成测试音频 |
 | `Windows/scripts/pe_version.py` | 写 PE 版本资源 |
+| `Windows/scripts/net_probe.py` | 网络通道探测（**只读**系统代理，实测哪条通道真正可用） |
+| `Windows/scripts/git_net.sh` | git 网络自动适配包装器（探测 → 只对本次命令生效，不改任何配置） |
 | `Windows/scripts/copy_ort.py` / `copy_sherpa_dlls.ps1` | 拷贝 ORT/sherpa DLL（**static 模式下已不需要**） |
 | `Windows/scripts/patch_protobuf_ns.py` | protobuf namespace 修补 |
 | `Windows/scripts/windows_plugin_junctions.ps1` | 建 Windows 插件目录 junction（`package.sh` 会自动调用） |
@@ -202,6 +204,75 @@ Translator/
 | 无字幕产出 | 本机没在播放声音 |
 | 转写盘写入失败 | 桌面不可写 / 磁盘满 / 杀软锁文件（自动降级为仅内存并提示） |
 | 安装后找不到程序 | 注册表写死 `HKLM`（用户模式）→ 改用 `HKA` |
+| `git push` 报 `Failed to connect to github.com:443` | 网络通道变了（代理软件关掉/换端口）→ 用 `git_net.sh` 自动适配（见下） |
+
+---
+
+## 七之二、Git 网络通道自动适配
+
+### 为什么需要
+
+代理软件的端口会变，也会被随手关掉。把端口写死进 `.git/config`
+的 `http.proxy` 后，代理一关 `git push` 立刻失败，而且**必须手工改
+配置**才能恢复——曾经就在 `.git/config` 里写死过 `127.0.0.1:7892`，
+代理软件一关，仓库就完全推不动了。
+
+现在改成**每次执行前实测**当前哪条通道真正可用，用完即弃。
+
+### 用法
+
+```bash
+# 自动适配（探测 → 执行）
+bash Windows/scripts/git_net.sh push
+bash Windows/scripts/git_net.sh pull --rebase
+bash Windows/scripts/git_net.sh fetch --tags
+
+# 只探测，不执行 git
+bash Windows/scripts/git_net.sh probe
+
+# 跳过探测，强制直连
+bash Windows/scripts/git_net.sh -- push
+
+# 跳过探测，指定代理
+bash Windows/scripts/git_net.sh --proxy http://127.0.0.1:7890 push
+```
+
+### 探测顺序
+
+按优先级**逐个实测**（不是看端口在不在——沙箱/工具注入的代理端口
+常在监听却走不通 GitHub）：
+
+1. 环境变量代理（`HTTPS_PROXY` / `HTTP_PROXY` 等）——用户显式设定
+2. Windows 系统代理（**只读** `HKCU\...\Internet Settings`）
+   ——`ProxyEnable=1` 时优先；即使为 0 也把 `ProxyServer` 里的端口
+   作为低优先级候选（用户可能只开了代理软件、没开"系统代理"开关）
+3. 常见本地代理端口：7890/7891/7897（Clash）、10808/10809（v2rayN）、
+   1080/1087/8118（Shadowsocks）、2080（sing-box）、4780、8888
+4. 直连（不使用任何代理）
+
+判定标准是**真实跑一次 `git ls-remote`**——urllib 说"能通"不等于 git
+能通（两者 TLS 栈与代理解析路径不同）。
+
+### 安全边界
+
+- **不写** `.git/config`——通道通过 `git -c http.proxy=...` 仅对本次
+  命令生效
+- **不碰**系统代理设置——注册表只读（`QueryValueEx`），不改
+  `ProxyEnable` / `ProxyServer`
+- **不写**任何凭据文件、不回显令牌
+
+### Git 代理相关的三个坑（实测）
+
+1. **`http.proxy` 与 `https.proxy` 必须同时设**。只设
+   `-c http.proxy=` 空值时，git 仍会回落到环境变量里的
+   `https_proxy` 并继续走它（表现为超时）。
+2. **同名 `-c` 选项后者覆盖前者**。所以顺序必须是
+   `-c http.proxy= -c https.proxy= -c http.proxy=<真实地址>`，
+   反过来会让代理被空值覆盖 → 退化成直连。
+3. **走代理时要保留环境变量里的 `http_proxy`**。Git for Windows 只有
+   在环境变量存在时才对 https 目标使用 CONNECT 隧道；清空环境变量后
+   即使显式给了 `-c http.proxy=`，隧道也会失败（报
+   `option to transmit`）。所以选代理时保留环境变量、选直连时清空。
 
 ---
 
