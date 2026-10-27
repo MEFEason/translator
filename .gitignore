@@ -76,3 +76,7 @@ codesign.cer
 *.log
 tools/*.zip
 translator_core/ui/*.zip
+
+# ── 内部文档（本机运维记录，不公开）─────────────────────────
+docs-internal/
+version_decision_*.md

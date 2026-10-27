@@ -1,260 +1,129 @@
-# Translator — 离线实时字幕翻译（Windows）
+# Translator — 离线实时字幕识别与翻译系统
 
-完全离线的实时语音转写 + 翻译字幕工具。ASR（sherpa-ONNX）与 MT（Bergamot）
-的推理代码**全部静态链接进 `translator_core.dll`**，磁盘上不存在任何
-`onnxruntime.dll` / `sherpa-onnx-*.dll`，从根本上规避 360 对「新增系统 DLL」的误报。
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Android-blue)
+![Version](https://img.shields.io/badge/version-1.0.0-blue)
+![License](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue)
+![Future License](https://img.shields.io/badge/converts%20to-Apache--2.0%20after%202%20years-green)
 
-> **许可证**：FSL-1.1-ALv2（Functional Source License 1.1，2 年后自动转 Apache-2.0）
-> 详见 `LICENSE`；第三方组件声明见 `NOTICE`。
+**全离线、零网络请求的实时语音转写与字幕翻译工具**，为视频会议等实时场景优化。
 
----
-
-## 一、构建（唯一入口）
-
-**所有构建都必须走 `package.sh`** —— 它注入预编译库路径、注入版本号、
-并在验证通过后才覆盖 `last_good` / `outputs`。
-
-```bash
-cd Translator/translator_core
-
-# 测试版（正式发布用 release 通道）
-TRANSLATOR_SEMVER=0.9.27 TRANSLATOR_CHANNEL=beta   bash Windows/scripts/package.sh
-
-# 正式版
-TRANSLATOR_SEMVER=1.0.0  TRANSLATOR_CHANNEL=release bash Windows/scripts/package.sh
-
-# 只重新打包（复用已构建产物，跳过编译）
-SKIP_BUILD=1 bash Windows/scripts/package.sh
-```
-
-> ⚠️ **环境变量名是 `TRANSLATOR_SEMVER` / `TRANSLATOR_CHANNEL`**（不是 `DSH_*`）。
-> 缺省会回落到 `snapshot` / `0.0.0`，并把版本串写进 DLL 与 `version.ini`。
-
-`package.sh` **一次跑完所有环节**，不需要再手动编译安装器：
-
-| 阶段 | 内容 |
-|---|---|
-| 0 | 前置检查（去重代理环境变量大小写冲突） |
-| 0.5 | 注入 `BERGAMOT_PREBUILT` / `BERGAMOT_SRC_DIR` / `SHERPA_ONNX_LIB_DIR` |
-| 1 | `cargo build --release`（Rust 源码未变则跳过）+ `flutter build windows --release` |
-| 2 | 组装 staging（收集全部 `*_plugin.dll`，剔除 ORT/sherpa 黑名单） |
-| 5 | **自动编译安装器**（找 `ISCC.exe` → 编译 `src/setup.iss` → 签名）到 `dist/` |
-| 3 | 验证 staging |
-| 3.2 | **出厂门禁 `verify_product.py`**（失败则 `die`，不动 `last_good`） |
-| 3.5 | 代码签名（360 QVM 降误报） |
-| 4 | 备份旧产物 → `last_good`，新产物 → `outputs` |
-
-### 手动跑 cargo build 的必要环境变量
-
-**不走 `package.sh` 直接 `cargo build --release` 必须手动带这三个变量**，
-否则会触发 Bergamot 的全新 CMake 配置 → 本机 CMake 4.3.1 拒绝子项目旧 policy → panic：
-
-```bash
-export BERGAMOT_PREBUILT=... BERGAMOT_SRC_DIR=... SHERPA_ONNX_LIB_DIR=...
-```
-
-（具体路径见 `package.sh` 第 149~170 行的 export 段。）
-
-### 增量构建
-
-Rust release 模式默认 `CARGO_INCREMENTAL=0`，`package.sh` 会打开增量。
-Rust 源码未变且版本戳未变时**跳过 cargo build**（全量 5-10 分钟 → 几十秒）。
-跳过时 `.version.ini` 用**从 DLL 反读的真实版本串**，保证
-「关于页 / 安装目录名 / version.ini」三处一致。
+- 音频不出本机：识别、翻译、字幕全部在本地完成
+- 静态链接架构：推理引擎（ONNX Runtime / sherpa-onnx / Bergamot）全部编入单一核心库，无独立第三方 DLL
+- © 2025–2026 MEFEason. All rights reserved.
 
 ---
 
-## 二、验证与测试脚本
+## 功能特性
 
-| 脚本 | 用途 | 命令 |
-|---|---|---|
-| `Windows/scripts/verify_product.py` | **出厂门禁**（音频无关）：加载真实 DLL + 真实模型，检查自检 `lib/asr/mt/glossary` 全 `ok` | `python Windows/scripts/verify_product.py <DLL目录>` |
-| `scripts/check_offline.py` | 离线性门禁（三层：源码审计 / 运行期依赖断言 / 构建期白名单） | `python scripts/check_offline.py` |
-| `scripts/verify_ffi.py` | 模拟 Dart 侧完整 FFI 调用路径（多声源、转写盘、历史回溯） | `python scripts/verify_ffi.py Translator 5` |
-| `scripts/selftest.sh` | 流水线自检（采集→断句→识别→翻译→字幕），**改完 core/ 后最快的反馈回路** | `bash scripts/selftest.sh` |
-| `scripts/selftest.sh --asr-sherpa --mt-bergamot --seconds 12 --bench` | 真实后端跑通整条链路 | 同上 |
-| `scripts/test_model_pack.py` | 模型包单元测试 | `python scripts/test_model_pack.py` |
-
-> ⚠️ **`verify_product.py` 是门禁，不是日志**。它真的拦下过缺陷（JSON 双重转义），
-> 别把它降级成「只打印结果」。
-
----
-
-## 三、辅助脚本（按需使用，非构建必需）
-
-| 脚本 | 用途 |
-|---|---|
-| `Windows/scripts/build_bergamot.py` | 编译 Bergamot 静态库（产物缺失时先跑这个） |
-| `Windows/scripts/build_windows.sh` | 仅编译 Windows Rust 核心 → `ui/windows/rust/translator_core.dll` |
-| `Android/scripts/build_android.sh` | 交叉编译 Android → `libtranslator_core.so`（仅 arm64） |
-| `scripts/build_model_pack.py` | 打包模型 |
-| `scripts/fetch_models.py` / `fetch_bergamot.py` | 下载模型 / Bergamot 资源（**唯一允许联网的脚本**，仅构建期） |
-| `scripts/setup_flutter.sh` | 安装 Flutter SDK（国内镜像） |
-| `Android/scripts/update_sdk_paths.sh` | Android SDK 迁移到 D 盘后改路径（**一次性迁移脚本，已跑过，日常不用**） |
-| `Android/scripts/check_android_env.py` | Android 环境自检 |
-| `scripts/gen_test_wav.py` / `gen_tts_wav.ps1` | 生成测试音频 |
-| `Windows/scripts/pe_version.py` | 写 PE 版本资源 |
-| `Windows/scripts/copy_ort.py` / `copy_sherpa_dlls.ps1` | 拷贝 ORT/sherpa DLL（**static 模式下已不需要**） |
-| `Windows/scripts/patch_protobuf_ns.py` | protobuf namespace 修补 |
-| `Windows/scripts/windows_plugin_junctions.ps1` | 建 Windows 插件目录 junction（`package.sh` 会自动调用） |
-| `Windows/scripts/cert_tools.ps1` / `_renew_cert.ps1` | 代码签名证书工具（`_renew_cert.ps1` 生成 `codesign.pfx`） |
-| `Windows/scripts/sign_outputs.ps1` | 对产物签名（`package.sh` 会自动调用） |
-| `scripts/_archive.py` | 产物归档 |
-| `scripts/test_model_pack.py` | 模型包测试 |
-
----
-
-## 四、版本号规范
-
-格式：`{channel}-v{主}.{次}.{修订}-build{YYYY}.{MMDD}.{HH}.{mm}`
-
-```
-beta-v0.9.27-build2026.1024.15.30
-release-v1.0.0-build2026.1025.09.15
-```
-
-- **单一来源**：Rust `build.rs` 生成 → `package.sh` 写 `Translator/.version.ini`
-  （`full` / `channel` / `semver` / `num` 四段）→ `setup.iss` 用 ISPP `ReadIni` 读取
-- **PE 版本资源**用 `num` 段 = 四段纯数字 `0.9.27.1024`
-  （带 `build` 或横杠的串进不了 PE 资源；同日重复构建靠完整串区分）
-- **递进规则**：
-  - 正式版大迭代 → 更新全部数字：`v1.0.0` → `v2.0.0`
-  - 测试版 → 只改后面数字，前面恒为 0：`0.9.1` → `0.9.8` → `0.9.12` → `0.9.45` → `0.10.56`
-  - 上一级变动，下级归零（通用准则）
-- **通道白名单**（Maven 语义 7 种）：`snapshot` / `alpha` / `beta` / `pre` /
-  `release` / `stable` / `current`
-- **4 位年**；**不加时间戳括号**；**关于页只显示版本号本身**
-- ⚠️ **时间只取一次**（脚本开头）—— Rust 编译耗时会让分组阶段重取 `date` 导致版本对不上
-
----
-
-## 五、目录结构
-
-```
-Translator/
-├── translator_core/              # 源码
-│   ├── core/                     # Rust 核心（采集/断句/识别/翻译/字幕/转写盘）
-│   │   └── src/
-│   │       ├── pipeline/engine.rs   # 主循环（feed_asr / commit_line）
-│   │       ├── asr/sherpa.rs        # ASR 会话与热词
-│   │       ├── audio/               # 采集 + AGC
-│   │       └── ffi_session.rs       # FFI 入口（create/start/stop）
-│   ├── ui/lib/                   # Flutter UI
-│   │   └── services/lyrics_window.dart  # 悬浮字幕窗
-│   ├── models/                   # 离线模型
-│   └── scripts/                  # ★ 所有构建与验证脚本
-├── src/setup.iss                 # Inno Setup 安装器脚本
-├── outputs/                      # 当前产物（交付用）
-├── last_good/                    # 上一次验证通过的产物（回滚用）
-├── .staging/                     # 临时组装目录
-├── dist/                         # 编译好的安装器（package.sh 自动生成）
-└── .version.ini                  # 版本号四段（Rust 侧唯一来源）
-```
-
----
-
-## 六、硬性约定
-
-### 构建安全
-- ✅ `package.sh` **必须验证通过才覆盖** `last_good` / `outputs`；验证不过 `die`
-- ✅ 破坏性验证（安装/卸载/清理）**只能由用户手动执行**
-- ✅ 交付前用**只读**体检核对：产物哈希/时间戳、产物 mtime 晚于所有源文件
-
-### 360 误报防护
-- ✅ exe 必须带 PE 版本资源
-- ❌ **禁止** VBS 隐藏启动
-- ❌ **禁止**向 `$PLUGINSDIR` 释放裸 `.ps1`
-- ❌ **禁止**安装阶段改用户 PATH / 在安装尾声手工写注册表键（改用 `[Registry]` 段）
-- ✅ ORT + sherpa + Bergamot 全部静态链接（sherpa 用 static-MT 包）
-
-### Flutter 插件 DLL
-- ✅ **不要枚举插件**，`package.sh` 把 `Release/` 下所有 DLL 一并带走（除 ORT/sherpa 黑名单）
-- ❌ 漏一个 `*_plugin.dll` → 安装后 exe 启动即报「找不到 xxx.dll」
-
-### 托盘图标
-- ✅ **必须用 `.ico` 文件路径**（`NOTIFYICONDATAW.hIcon` 是 HICON，由 `LoadImage` 加载）
-- ❌ **禁止**传 base64 PNG data URI → API 全成功、日志打「已就绪」，但通知栏完全不显示
-- ✅ `app_icon.ico` 必须进产物
-
-### 安装器（Inno Setup 6.7.3）
-- ✅ 注册表一律用根键 `HKA`（写死 `HKLM` → 用户模式报 `RegCreateKeyEx` 错误码 5）
-- ✅ `PrivilegesRequired=admin` + `PrivilegesRequiredOverridesAllowed=dialog` +
-  `DefaultDirName={autopf}\Translator`
-- ✅ `[Code]` 里行首不能出现 `#`（ISPP 当成预处理指令 → 编译失败）
-- ❌ 文件关联不要用 `HKCR`，用 `HKA` + `Subkey: "SOFTWARE\Classes\..."`
-- ISCC.exe 位置：`代码开发/tools/innosetup/ISCC.exe`
-  （`package.sh` 会依次探测 `tools/innosetup/`、`tools/innosetup/app/`、
-  `Program Files (x86)/Inno Setup 6/`）
-
----
-
-## 七、排障
-
-| 现象 | 可能原因 |
-|---|---|
-| cargo 报 `could not execute process build-script-build` / `拒绝访问 (os error 5)` | 环境块有大小写重复的代理变量（`HTTPS_PROXY` + `https_proxy`）→ `package.sh` 第 0 步已去重 |
-| 手工 cargo build 触发 CMake 策略 panic | 缺 `BERGAMOT_PREBUILT` / `BERGAMOT_SRC_DIR` / `SHERPA_ONNX_LIB_DIR` |
-| 启动即退出，无窗口 | `translator_core.dll` 未与 exe 同目录 / 缺失 |
-| 启动报「找不到 xxx.dll」 | 漏收 `*_plugin.dll` |
-| 自检显示「采集不可用」 | 无音频输出设备 / 设备被独占 / 系统策略限制 |
-| 无字幕产出 | 本机没在播放声音 |
-| 转写盘写入失败 | 桌面不可写 / 磁盘满 / 杀软锁文件（自动降级为仅内存并提示） |
-| 安装后找不到程序 | 注册表写死 `HKLM`（用户模式）→ 改用 `HKA` |
-
----
-
-## 八、长期记忆
-
-跨会话的关键约定已沉淀到：
-
-- `代码开发/.workbuddy/memory/MEMORY.md` — 工作区长期记忆（通用经验 + Translator 约定）
-- `代码开发/.workbuddy/memory/MEMORY-translator_core.md` — Translator 专属长期记忆
-- `代码开发/.workbuddy/memory/2026-10-24.md` — 当日工作日志（含 0.9.14~0.9.27 全部修复记录）
-
-**修改本项目后请同步更新上述记忆**，避免下个会话读到过期信息。
-
----
-
-## 九、许可与合规（不可跳过）
-
-本项目采用 **FSL-1.1-ALv2**（Functional Source License 1.1，ALv2 未来许可）。
-自每个版本发布之日起满 2 年，该版本**自动转为 Apache License 2.0**。
-
-### 关键约束
-
-| 约束 | 说明 |
+| 模块 | 说明 |
 |------|------|
-| **Redistribution 条款** | 再分发任何副本/修改/衍生作品时，**必须附带条款副本或链接**，且不得移除已有版权声明 |
-| **Competing Use** | 禁止把本软件（或功能相同/实质相似的变体）作为商业产品或服务提供给第三方 |
-| **自动转 Apache-2.0** | 满 2 年自动转换，无需申请 |
-| **CLA 必须先落地** | 变更许可需贡献者同意 → **接受第一个 PR 之前**必须启用 CLA |
+| 实时语音识别（ASR） | sherpa-onnx 流式识别，中英双语模型 |
+| 离线机器翻译（MT） | Bergamot（Firefox Translations 同源引擎），英→中 |
+| 悬浮字幕窗 | 实时逐行字幕，词库（glossary）可自定义术语 |
+| 转写存档 | 本地记录，可导出 SRT 字幕 |
+| 完全离线 | 运行期零网络请求（模型需首次导入，见下文） |
 
-### ⚠️ 静态链接带来的额外义务
+## 系统要求（Windows）
 
-ORT / sherpa-onnx / Bergamot 等**静态链接**进了 `translator_core.dll`，
-静态链接意味着这些组件的许可条款**直接适用于本产品的分发行为**：
+- Windows 10 及以上，64 位
+- 推荐 8 GB 内存
+- 无需安装 .NET / VC++ 运行库（核心库自包含）
 
-- ONNX Runtime — MIT
-- sherpa-onnx — Apache-2.0
-- Bergamot — MPL-2.0（文件级 copyleft，修改了源文件就须公开那些文件）
-- PCRE2 — BSD-3-Clause
+## 安装与使用
 
-→ 所以 `LICENSE` / `NOTICE` / `THIRD_PARTY_LICENSES/` **必须进产物、必须进安装包**。
+1. 从 [Releases](../../releases) 下载最新安装包 `Translator-Setup-*.exe`
+2. 运行安装（可选「为所有用户」或「仅当前用户」，后者不弹 UAC）
+3. 首次启动在设置页导入模型包（`.dshm`，双语 ASR + 英中 MT）
+4. 开始转写：选择音频来源（麦克风 / 系统声音回环），字幕实时浮现
 
-### 已接入的合规门禁
+> 模型权重不包含在仓库与安装包内（体积与许可原因），需在应用内导入。
 
-| 门禁 | 位置 | 作用 |
-|------|------|------|
-| 许可文件缺失 → `die` | `Windows/scripts/package.sh` | 缺 `LICENSE`/`NOTICE`/`THIRD_PARTY_LICENSES/` 直接中止发布 |
-| `LicenseFile` 校验 | `Windows/src/setup.iss` | 安装器许可页缺 RTF → 编译失败 |
-| RTF 自动生成 | `package.sh` | 从 `LICENSE` 生成，条款永远一致 |
+## 仓库结构
 
-⚠️ **改 `LICENSE` 文本后无需手动改 RTF** —— `package.sh` 每次构建都会重新生成。
-但**改了 `NOTICE` 或 `THIRD_PARTY_LICENSES/` 内容**后，也要重跑一次
-`package.sh`（或手动同步 `Windows/outputs/`）才生效。
+```
+├── translator_core/
+│   ├── core/          # Rust 核心：采集/断句/识别/翻译/字幕/FFI
+│   ├── ui/            # Flutter 应用（Windows / Android）
+│   ├── docs/          # 设计与平台文档（DESIGN / WINDOWS_SETUP / ANDROID_SETUP）
+│   └── scripts/       # 公共脚本（模型打包、离线门禁等）
+├── Windows/
+│   ├── scripts/       # 构建 / 签名 / 验证
+│   └── src/setup.iss  # Inno Setup 安装器
+├── Android/
+│   └── scripts/       # Android 交叉构建
+├── LICENSE            # FSL-1.1-ALv2 全文
+├── NOTICE             # 第三方组件声明
+├── THIRD_PARTY_LICENSES/
+├── SECURITY.md        # 漏洞报告策略
+└── CONTRIBUTING.md    # 贡献与 CLA
+```
 
-### 商业授权
+## 从源码构建
 
-需要 Competing Use 场景请联系 **2575633220@qq.com**。
+依赖：Rust（MSVC 工具链）、Flutter（Windows desktop）、Inno Setup 6（打安装器）。
+
+```bash
+# Windows 一键构建（Rust → Flutter → 组装 → 验证 → 安装器 → 签名）
+cd Windows/scripts
+TRANSLATOR_SEMVER=1.0.0 TRANSLATOR_CHANNEL=release bash package.sh
+
+# Android
+bash Android/scripts/build_android.sh
+```
+
+构建细节与排障见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+
+## 核心 FFI 接口（`translator_core.dll` / `.so`）
+
+供宿主应用（Flutter / 其他语言）调用的 C ABI，节选：
+
+```c
+translator_create / translator_start / translator_stop   // 会话生命周期
+translator_push_chunk                                   // 推送 PCM 音频块
+translator_selfcheck_json                               // 自检（lib/asr/mt/glossary）
+translator_session_capture_capability                   // 采集能力探测
+translator_glossary_load / _reload                      // 术语词库
+translator_free_string / translator_free_capture        // 内存归还
+```
+
+完整清单见 `translator_core/core/src/ffi_session.rs` 与 `translator_core/docs/DESIGN.md`。
+
+## 许可证
+
+本项目采用 **[FSL-1.1-ALv2](https://fsl.software/)**（Functional Source License 1.1，ALv2 Future License）。
+
+| | 是否允许 |
+|--|--|
+| 个人使用 / 学习 / 研究 | ✅ 免费 |
+| 公司内部使用 | ✅ 免费 |
+| 基于本软件开发你自己的产品 | ✅ 免费 |
+| 作为竞争性商业产品/服务对外提供 | ❌ 需商业授权 |
+
+**每个版本自发布之日起满 2 年，自动转为 Apache License 2.0**（v1.0.0 → 2028-10-25）。
+
+> 注意：FSL 不属于 OSI 定义的「开源许可证」，而是 Fair Source（源码可见 + 商业受限）。
+
+商业授权联系：[2575633220@qq.com](mailto:2575633220@qq.com)
+
+第三方组件（ONNX Runtime / sherpa-onnx / Bergamot / PCRE2 / Flutter 等）的许可与义务见 [`NOTICE`](NOTICE) 与 [`THIRD_PARTY_LICENSES/`](THIRD_PARTY_LICENSES/)。
+
+## 贡献
+
+提交 PR 即视为同意 [`CONTRIBUTING.md`](CONTRIBUTING.md) 中的 CLA（含重新许可授权，为 2 年后的 Apache-2.0 转换与商业分支保留可能）。
+
+安全漏洞请按 [`SECURITY.md`](SECURITY.md) 私下报告，勿开公开 Issue。
+
+## 致谢
+
+[ONNX Runtime](https://github.com/microsoft/onnxruntime) ·
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) ·
+[bergamot-translator](https://github.com/browsermt/bergamot-translator) ·
+[Flutter](https://flutter.dev/)
 
 ---
+
+<div align="center">
+
+**Translator — Making conversations accessible, offline**
+
+</div>
