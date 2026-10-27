@@ -63,6 +63,14 @@ plugins {
     //    minimum supported version of 2.2.20"
     // 官方 flutter create 模板用的是 2.4.0，此处对齐。
     id("org.jetbrains.kotlin.android") version "2.4.0" apply false
+    // ⚠️ 2026-10-27：**不要**加 `org.gradle.toolchains.foojay-resolver-convention`。
+    // 0.9.0 与本工程的 Gradle 9.3.1 不兼容 —— 它引用了 9.4+ 才有的
+    // `JvmVendorSpec.IBM_SEMERU` 字段，构建直接崩：
+    //   "Could not initialize class org.gradle.toolchains.foojay.DistributionsKt
+    //    / NoSuchFieldError: JvmVendorSpec does not have member field IBM_SEMERU"
+    // JDK 自动下载已在 gradle.properties 用
+    // `org.gradle.java.installations.auto-download=false` 关掉（本机有 Java 25），
+    // 不需要 toolchain 解析器插件。
 }
 
 dependencyResolutionManagement {
