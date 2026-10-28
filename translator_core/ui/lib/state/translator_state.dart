@@ -4,7 +4,6 @@ import 'dart:io'
     show
         Platform,
         Process,
-        ProcessStartMode,
         File,
         Directory,
         FileMode,
@@ -17,7 +16,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../ffi/bridge.dart';
 import '../services/android_channel.dart';
 import '../services/tray_service.dart';
-import '../services/tray_service.dart' show setFloatingSubtitleMode;
 import '../services/lyrics_window.dart';
 
 /// 字幕行（与 Rust 侧 `SubtitleLine` 对应）。
@@ -551,6 +549,31 @@ class TranslatorState extends ChangeNotifier {
     if (_lyricsWindowEnabled == v) return;
     _lyricsWindowEnabled = v;
     notifyListeners();
+    if (AndroidChannel.instance.isAndroid) {
+      // Android：原生 Overlay 字幕窗（任务 #24）。
+      // 未授予悬浮窗权限时先跳系统设置页引导，本次不强制打开
+      // （用户授权后回来再开一次即可）—— 禁止静默失败。
+      if (v) {
+        if (!await AndroidChannel.instance.overlayPermission()) {
+          await AndroidChannel.instance.requestOverlayPermission();
+          _sessionError = '请在系统设置中允许 Translator 显示其他应用上方内容，再回来重新开启字幕';
+          _lyricsWindowEnabled = false;
+          notifyListeners();
+          return;
+        }
+        final err = await AndroidChannel.instance.showSubtitle();
+        if (err != null) {
+          _sessionError = '字幕窗启动失败：$err';
+          _lyricsWindowEnabled = false;
+          notifyListeners();
+          return;
+        }
+        _writeLyricsShared(); // 立即喂一帧，避免开窗空白
+      } else {
+        await AndroidChannel.instance.hideSubtitle();
+      }
+      return;
+    }
     if (v) {
       unawaited(_startLyricsProcess());
     } else {
@@ -658,6 +681,22 @@ class TranslatorState extends ChangeNotifier {
         },
     ];
     // partial 一并下发：字幕窗流式形态（一句不切，当前行实时刷新）
+    if (AndroidChannel.instance.isAndroid) {
+      // Android 走原生 Overlay（任务 #24）：MethodChannel 直推，
+      // 不写共享文件（那是桌面第二实例的通道，Android 用不了）。
+      // 用户定版：固定两行 —— 原文流式行与译文流式行**各自独立**
+      // 顶替对应行（不做合并顶替，否则中文流式会把英文行整行吃掉）。
+      // fire-and-forget：字幕推送失败绝不阻塞转写轮询。
+      unawaited(AndroidChannel.instance.updateSubtitle(
+        lines: [
+          for (final l in tail)
+            {'s': l.source, 't': l.target ?? ''},
+        ],
+        partial: _partial,
+        partialZh: _partialZh,
+      ));
+      return;
+    }
     writeLyricsShared(
         fontSize: _subtitleFontSize,
         lines: lines,
@@ -753,6 +792,85 @@ class TranslatorState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 探测 Android 上的模型布局（容错版）。
+  ///
+  /// ## 为什么必须容错
+  ///
+  /// `Directory.existsSync()` / `listSync()` 在**目录无权访问**时抛
+  /// `FileSystemException`（errno 13），而不是返回 false / 空列表。
+  /// Android 11+ 分区存储下，若模型被 `adb push` 到外部目录且属主是 shell，
+  /// 应用探测时就会抛这个异常 → **中断整个 bootstrap**（界面永远停在
+  /// 「加载中」，且日志里只有一条 platform error）。
+  ///
+  /// 故所有目录访问都包 try/catch，探不到就当「没有」，继续下一个落点。
+  ///
+  /// ## 布局约定
+  ///
+  /// ```
+  /// <root>/models/asr/<模型名>/{encoder.int8.onnx, tokens.txt, ...}
+  /// <root>/models/mt/{Bergamot 权重}          ← 直接一层
+  /// ```
+  ///
+  /// Rust 的 `probe_asr_dir` **只看本层**（要能直接命中 encoder*.onnx），
+  /// 而模型实际在下一层 → 这里必须定位到**具体模型目录**。
+  ModelPaths _probeAndroidModels(String root) {
+    // ASR：asr 目录下第一个含 encoder*.onnx 的子目录
+    var asrDir = '';
+    final asrRoot = Directory('$root${Platform.pathSeparator}asr');
+    try {
+      if (asrRoot.existsSync()) {
+        final subs = <Directory>[];
+        try {
+          subs.addAll(asrRoot.listSync().whereType<Directory>());
+        } catch (_) {
+          // 该子目录不可读 → 视为空
+        }
+        for (final sub in subs) {
+          bool hasEncoder;
+          try {
+            hasEncoder = sub.listSync().any((f) =>
+                f is File &&
+                f.path
+                    .split(Platform.pathSeparator)
+                    .last
+                    .startsWith('encoder') &&
+                f.path.endsWith('.onnx'));
+          } catch (_) {
+            hasEncoder = false;
+          }
+          if (hasEncoder) {
+            asrDir = sub.path;
+            break;
+          }
+        }
+        // 兜底：模型文件直接放在 asr 目录下
+        if (asrDir.isEmpty) {
+          try {
+            if (asrRoot.listSync().any(
+                (f) => f is File && f.path.endsWith('encoder.int8.onnx'))) {
+              asrDir = asrRoot.path;
+            }
+          } catch (_) {
+            // 不可读 → 保持空
+          }
+        }
+      }
+    } catch (_) {
+      // asr 根目录不可访问（如外部目录属主是 shell）
+    }
+
+    // MT 权重在 models/mt/ 直接一层（Bergamot 格式）
+    var mtDir = '';
+    final mtPath = '$root${Platform.pathSeparator}mt';
+    try {
+      if (Directory(mtPath).existsSync()) mtDir = mtPath;
+    } catch (_) {
+      // 不可访问 → 视为无 MT
+    }
+
+    return ModelPaths(asrDir, mtDir, root);
+  }
+
   /// 启动引导：加载库 → 建会话 → 自检 → 探测采集能力。
   ///
   /// 在 `HomeShell.initState` 里调用（不能放构造函数 ——
@@ -795,6 +913,23 @@ class TranslatorState extends ChangeNotifier {
       sources.add({'kind': 'systemAudio', 'speaker': _speakerRemote});
     }
 
+    // ── 线程调整器（2026-10-28 任务 #23）──
+    // Android 按硬件画像推导默认线程档，**必须在 cfg 构建之前**：
+    //
+    // ⚠️ 第一版写在下面的模型探测分支里，而 cfg 在它之前已把
+    // _asrThreads 读走冻结 —— 真机日志实锤：画像算出 asr=6，
+    // Rust 侧 ASR 加载日志却是 threads=4（档位根本没传下去）。
+    // 顺序即契约：改状态的代码永远放在消费它之前。
+    //
+    // 产品定位（MEMORY 2026-10-25）：默认**满档**保字幕跟手，
+    // 只有硬件真实受限才收 —— 与 Windows 端「不因检测到会议软件
+    // 而降档」同理。
+    if (AndroidChannel.instance.isAndroid) {
+      final prof = await AndroidChannel.instance.deviceProfile();
+      setAsrThreads(prof.defaultAsrThreads);
+      debugPrint('[threads] Android 画像 $prof → asr=$_asrThreads');
+    }
+
     // 资源档位：决定占用多少 CPU 线程（轻量 1 / 均衡 2 / 全力 4）。
     // Rust 侧收到后会自动联动线程数、断句档与翻译精度档。
     final cfg = <String, dynamic>{
@@ -817,44 +952,41 @@ class TranslatorState extends ChangeNotifier {
     //   <externalFilesDir>/models/{asr,mt,offline,glossary}
     ModelPaths models;
     if (AndroidChannel.instance.isAndroid) {
-      final ext = await AndroidChannel.instance.externalFilesDir();
-      if (ext.isNotEmpty) {
-        final root = '$ext/models';
-        // ⚠️ Rust 的 probe_asr_dir **只看本层**（要能直接命中
-        // encoder*.onnx / tokens.txt），而模型实际在下一层：
-        //   models/asr/<模型名>/{encoder.int8.onnx, tokens.txt, ...}
-        // 故这里必须定位到**具体模型目录**，不能传 models/asr。
-        final asrRoot = Directory('$root/asr');
-        var asrDir = '';
-        if (asrRoot.existsSync()) {
-          // 优先：asr 目录下第一个含 encoder*.onnx 的子目录
-          for (final sub in asrRoot.listSync()) {
-            if (sub is Directory &&
-                sub.listSync().any((f) =>
-                    f is File &&
-                    f.path
-                        .split(Platform.pathSeparator)
-                        .last
-                        .startsWith('encoder') &&
-                    f.path.endsWith('.onnx'))) {
-              asrDir = sub.path;
-              break;
-            }
-          }
-          // 兜底：模型文件直接放在 asr 目录下
-          if (asrDir.isEmpty &&
-              asrRoot.listSync().any(
-                  (f) => f is File && f.path.endsWith('encoder.int8.onnx'))) {
-            asrDir = asrRoot.path;
-          }
+      // ── 模型内置化（2026-10-28 任务 #17）──
+      // 模型随 APK 打进 assets，首启由 Kotlin 解压到 filesDir/models。
+      // 探测前**必须等解压完成** —— 否则探到半成品目录，加载必崩。
+      // 已解压过的启动第一次轮询即返回 ready，几乎零耗时。
+      final ready = await AndroidChannel.instance.waitForModels(
+        onTick: (hint) => debugPrint('[models] $hint'),
+      );
+      if (!ready) {
+        debugPrint('[models] Android 模型解压超时/失败，退回 mock 后端');
+      }
+      // ⚠️ 2026-10-27：Android 上要**依次试两个落点**。
+      //
+      // 1) 内部私有目录 /data/data/<pkg>/files —— **首选**。
+      //    权限天然正确（属主=应用 UID），模型由 `run-as` 搬运进来。
+      // 2) 外部私有目录 /storage/emulated/0/Android/data/<pkg>/files —— 兜底。
+      //    ⚠️ 这里 `existsSync()` 在**无权访问**时会抛 FileSystemException
+      //    （errno 13），而不是返回 false → 整个 bootstrap 被中断。
+      //    所以目录探测必须包 try/catch，且两个落点要独立探测。
+      final roots = <String>[];
+      final internal = await AndroidChannel.instance.internalFilesDir();
+      if (internal.isNotEmpty) roots.add('$internal/models');
+      final external = await AndroidChannel.instance.externalFilesDir();
+      if (external.isNotEmpty) roots.add('$external/models');
+
+      models = const ModelPaths('', '', '');
+      for (final root in roots) {
+        final found = _probeAndroidModels(root);
+        if (found.asr.isNotEmpty || found.mt.isNotEmpty) {
+          models = found;
+          debugPrint('[models] Android 模型目录命中: $root');
+          break;
         }
-        // MT 权重在 models/mt/ 直接一层（Bergamot 格式）
-        final mtDir = '$root/mt';
-        final mtOk = Directory(mtDir).existsSync();
-        models = ModelPaths(asrDir, mtOk ? mtDir : '', root);
-        debugPrint('[models] Android 模型目录: asr=$asrDir mt=${models.mt}');
-      } else {
-        models = const ModelPaths('', '', '');
+      }
+      if (models.asr.isEmpty) {
+        debugPrint('[models] Android 未找到模型（探测过 ${roots.length} 个落点）');
       }
     } else {
       models = _bridge.discoverModels();
@@ -962,20 +1094,33 @@ class TranslatorState extends ChangeNotifier {
     // 顺序要点：会话先起（Rust 侧采集器就位、running 置真），
     // 再让 Kotlin 推音频 —— 反了的话推入会被 running 校验拒掉。
     if (AndroidChannel.instance.isAndroid) {
-      // 下标必须**按声源类型**查，不能写死 0：
-      // 会话的采集器列表只含创建成功的，下标与 cfg.sources 可能错位
-      // （如卓易通容器内内放建不起来，就只剩麦克风那一路在下标 0）。
+      // ── 双路并行采集（2026-10-28 用户实测「麦克风收音不到」后改造）──
       //
-      // 优先内放（视频会议场景的核心价值）；内放不可用时 Kotlin 自动
-      // 降级麦克风 —— 但**推流下标不变**（仍推内放那一路），
-      // 因为 Rust 侧该路的采集器始终存在（ExternalPushCapture 总是建得起来），
-      // 麦克风降级只是「采到的是麦克风声音」，声源归属不变。
+      // 旧逻辑：只起**一路**。默认声源集含 systemAudio + microphone，
+      // 走内放时麦克风那路根本没采 → 用户对着手机说话没反应。
+      // 这不是设置问题，是架构缺口：会话建了两路采集器，生产者却只起一路。
+      //
+      // 新逻辑：两路各自查下标、各自传给 Kotlin，并行跑。
+      //   kind 0 = 系统内放（会议声音，会议软件是**被翻译对象**）
+      //   kind 1 = 麦克风（本地说话）
+      //
+      // 下标必须**按声源类型**查，不能写死 0：会话的采集器列表只含
+      // 创建成功的，下标与 cfg.sources 可能错位（容器内内放建不起来
+      // 就只剩麦克风在下标 0）。
       const kindSystemAudio = 0;
-      final idx = _bridge.captureIndex(kindSystemAudio);
-      final useSystemAudio = _sources.contains('systemAudio');
-      final srcIdx =
-          idx >= 0 ? idx : _bridge.captureIndex(1); // 内放采集器不存在 → 退到麦克风那一路
-      if (srcIdx < 0) {
+      const kindMicrophone = 1;
+
+      // 用户勾了哪路就起哪路；未勾的传 -1（该路不起）。
+      final wantSys = _sources.contains('systemAudio');
+      final wantMic = _sources.contains('microphone');
+      final sysIdx = wantSys ? _bridge.captureIndex(kindSystemAudio) : -1;
+      final micIdx = wantMic ? _bridge.captureIndex(kindMicrophone) : -1;
+
+      debugPrint(
+          '[transcribe] Android 双路采集：wantSys=$wantSys(sys=$sysIdx) '
+          'wantMic=$wantMic(mic=$micIdx)');
+
+      if (sysIdx < 0 && micIdx < 0) {
         _sessionError = '会话未创建任何采集器，无法采集音频';
         debugPrint('[transcribe] Android 无可用采集器');
         _bridge.sessionStop();
@@ -984,8 +1129,9 @@ class TranslatorState extends ChangeNotifier {
       }
       final err = await AndroidChannel.instance.startCapture(
         session: _bridge.sessionAddress,
-        sourceIndex: srcIdx,
-        useSystemAudio: useSystemAudio,
+        sysIndex: sysIdx,
+        micIndex: micIdx,
+        useSystemAudio: wantSys && sysIdx >= 0,
       );
       if (err != null) {
         _sessionError = '采集启动失败：$err';
@@ -995,12 +1141,10 @@ class TranslatorState extends ChangeNotifier {
         notifyListeners();
         return;
       }
-      // 采集状态（可能已降级为麦克风）—— 显式呈现，禁止静默
-      final st = await AndroidChannel.instance.captureStatus();
-      if (st.degraded) {
-        _sessionError = st.degrade;
-        debugPrint('[transcribe] Android 采集降级：${st.degrade}');
-      }
+      // 采集状态：投屏授权是**异步**的（用户在系统弹窗点「立即开始」
+      // 服务才真正起来），启动后立刻查拿到的是旧状态 —— 必须轮询。
+      // 后台等待，不阻塞「转写已启动」的 UI 反馈。
+      unawaited(_awaitAndroidCaptureStatus());
     }
 
     debugPrint('[transcribe] 转写已启动');
@@ -1023,6 +1167,28 @@ class TranslatorState extends ChangeNotifier {
       const Duration(milliseconds: 60),
       (_) => _poll(),
     );
+  }
+
+  /// 后台等待 Android 采集服务真正起来，并把真实模式/降级原因呈现出来。
+  ///
+  /// ## 为什么必须轮询（不能查一次）
+  ///
+  /// 投屏授权是**异步**的：`startCapture` 只回「已受理」，采集服务要等
+  /// 用户在系统弹窗点「立即开始」才真正起来。启动后立刻查 `captureStatus`
+  /// 拿到的是**旧状态**（idle 或上一次的模式），于是：
+  /// - 用户拒绝投屏 → 看不到「已降级为麦克风」，以为没在采
+  /// - 授权成功 → 模式仍是旧的，UI 显示不对
+  ///
+  /// 后台轮询直到模式变为非 idle，把真实状态与降级原因写回
+  /// [_sessionError]（**显式呈现，禁止静默降级**，DESIGN §2.5.2）。
+  Future<void> _awaitAndroidCaptureStatus() async {
+    final st = await AndroidChannel.instance.waitForCaptureMode();
+    if (!_running) return; // 期间用户已停止 → 不再改状态
+    debugPrint('[transcribe] Android 采集模式=${st.mode} 降级=${st.degrade}');
+    if (st.degraded) {
+      _sessionError = st.degrade;
+      notifyListeners();
+    }
   }
 
   /// 停止转写并冲刷残留段。

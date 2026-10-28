@@ -158,8 +158,9 @@ Source: "..\outputs\THIRD_PARTY_LICENSES\*"; DestDir: "{app}\release\{#MyAppVers
 ; 的「修改系统 DLL」报毒（Inno 进程 MoveFile/FileCopy 都会被拦），
 ; 而 static 模式让这个文件根本不存在。
 ;
-; ---- 模型权重（ASR zipformer + MT Bergamot，约 94 MB）----
+; ---- 模型权重（ASR zipformer + 离线 ASR SenseVoice + MT Bergamot，约 440 MB）----
 ; 真实 ASR/MT 后端启动必需。GUI 会从 exe 同级的 models\ 读模型目录。
+; 权重文件**已随安装包一起分发**，用户装完即可离线运行，无需另行下载。
 Source: "..\outputs\models\*"; DestDir: "{app}\release\{#MyAppVersion}\models"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; ---- 代码签名根证书（仅公钥，不含私钥）----

@@ -113,6 +113,19 @@ pub struct CaptureHandle {
     /// Dart 侧就不能再经 `translator_poll_chunk` 取音频了。
     chunk_rx: Mutex<Option<Receiver<PcmChunk>>>,
     running: AtomicBool,
+    /// 本采集器对应的**声源类型**（内放 / 麦克风）。
+    ///
+    /// ## 为什么必须存（2026-10-28 双路并行改造）
+    ///
+    /// 会话的采集器列表**只含创建成功的**（创建失败不致命），
+    /// 故 `capture` 的下标与 `cfg.sources` 的下标可能错位：
+    /// 例如内放建不起来时，列表里只剩麦克风，它在下标 0，
+    /// 而 `cfg.sources[0]` 是内放。
+    ///
+    /// 旧实现靠「位置对齐」反查声源 → 张冠李戴（麦克风的音频被
+    /// 当成内放推，字幕说话人标签错乱）。存死声源类型后，
+    /// 按类型查下标永远正确，与位置无关。
+    source: CaptureSource,
 }
 
 impl CaptureHandle {
@@ -146,7 +159,15 @@ impl CaptureHandle {
             chunk_tx: tx,
             chunk_rx: Mutex::new(Some(rx)),
             running: AtomicBool::new(false),
+            source,
         })
+    }
+
+    /// 本采集器的声源类型（内放 / 麦克风）。
+    ///
+    /// 按**类型**而非位置查下标 —— 见 struct 字段 `source` 的说明。
+    pub fn source(&self) -> CaptureSource {
+        self.source
     }
 
     pub fn start(&self) -> Result<()> {

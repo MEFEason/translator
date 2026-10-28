@@ -64,6 +64,11 @@ if [[ -z "${TRANSLATOR_SEMVER:-}" || -z "${TRANSLATOR_CHANNEL:-}" ]]; then
 fi
 # 时间只取一次（构建耗时长，分段重取会导致三处版本串不一致）
 export TRANSLATOR_BUILD_TIME="${TRANSLATOR_BUILD_TIME:-$(date '+%Y-%m-%d %H:%M:%S')}"
+# 端标识（全小写，用户 2026-10-28 规定）：版本串格式
+#   {端标识}-{渠道}-v{版本}-{时间戳}，例 android-beta-v0.9.7-2026.1028.09.35
+# 显式注入而非依赖 build.rs 按 CARGO_CFG_TARGET_OS 推断 —— 构建脚本
+# 明确知道自己在做哪端，不该靠推断。
+export TRANSLATOR_PLATFORM="${TRANSLATOR_PLATFORM:-android}"
 
 # ── 定位 NDK ──────────────────────────────────────────
 find_ndk() {
@@ -161,14 +166,77 @@ export CC_aarch64_linux_android="$LINKER"
 export CXX_aarch64_linux_android="$TOOLCHAIN/bin/${TARGET}${API}-clang++.cmd"
 export AR_aarch64_linux_android="$TOOLCHAIN/bin/llvm-ar"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$LINKER"
+# ⚠️ ANDROID_NDK（不是 ANDROID_NDK_HOME）：core/build.rs 用它定位
+#    NDK 的 sysroot 里的 libc++_static.a（链接 Bergamot 全树需要）。
+export ANDROID_NDK="$NDK"
 
 # ── feature 选择 ──────────────────────────────────────
-# 完整引擎：sherpa shared（Android 专用）+ Kotlin 注入采集。
-# MT（mt-bergamot）阶段 2 再接入 —— 阶段 1 产物译文降级为原文。
-FEATURES="capture-android,asr-sherpa-android"
+# 完整引擎：sherpa shared（Android 专用）+ Kotlin 注入采集
+#           + Bergamot 离线翻译（2026-10-28 接入）。
+#
+# ⚠️ mt-bergamot 依赖 arm64 版 Bergamot 静态库，
+#    由 build_bergamot_android.sh 交叉编译产出。
+#    没开这个 feature 时 Rust 侧的 build_mt_backend 会退化成 NullMt
+#    —— 表现为「能识别但没有译文」（2026-10-28 用户实测反馈）。
+FEATURES="capture-android,asr-sherpa-android,mt-bergamot"
 if [[ "$MOCK_ONLY" == "1" ]]; then
   FEATURES="capture-android"
   echo "[INFO] --mock：仅采集契约，不链 sherpa（调试壳）"
+fi
+
+# ── Bergamot（翻译引擎）交叉编译 ────────────────────────
+# 产物：third_party/bergamot-translator/build-android/
+#   ├─ 各个 .a（CMake/Ninja 产出）
+#   └─ bergamot_libs.txt（链接清单，build.rs 读它）
+#
+# 已有产物则跳过（增量构建友好）；用 --rebuild-bergamot 强制重来。
+BERGAMOT_BUILD_DIR="$REPO/translator_core/third_party/bergamot-translator/build-android"
+BERGAMOT_LIST="$BERGAMOT_BUILD_DIR/bergamot_libs.txt"
+if [[ "$MOCK_ONLY" != "1" ]]; then
+  if [[ ! -f "$BERGAMOT_LIST" || "${1:-}" == "--rebuild-bergamot" ]]; then
+    echo "[INFO] 交叉编译 Bergamot（arm64）……"
+    bash "$SCRIPT_DIR/build_bergamot_android.sh" || {
+      cat >&2 <<EOF
+[FAIL] Bergamot 交叉编译失败 —— Android 端将没有翻译能力。
+       可先用 --mock 或临时去掉 mt-bergamot feature 继续其它工作。
+EOF
+      exit 1
+    }
+    # 构建目录可能因生成器变更而带后缀（build-android-ninja），
+    # 故从脚本输出里取实际目录。
+    #
+    # ⚠️ 不能写成 `ls ... | head -1`：脚本开了 `set -o pipefail`，
+    #    head 读够就退出 → ls 收到 SIGPIPE → 退出码 141/2 →
+    #    `set -e` 直接把整个脚本中断（表现为"构建到一半就没了"）。
+    #
+    # ⚠️ 也不能用 glob 展开（`for d in "$REPO"/.../build-android*`）：
+    #    路径含中文/空格时，glob 若无匹配就原样保留字面量，
+    #    `[ -d "$d" ]` 恒为假 → 找不到目录。
+    #    用「父目录已知 + 逐个子项判断」的方式，不依赖 glob。
+    BERGAMOT_PARENT="$REPO/third_party/bergamot-translator"
+    BERGAMOT_BUILD_DIR=""
+    if [ -d "$BERGAMOT_PARENT" ]; then
+      for d in "$BERGAMOT_PARENT"/*; do
+        case "$(basename "$d")" in
+          build-android*)
+            if [ -d "$d" ]; then BERGAMOT_BUILD_DIR="$d"; break; fi
+            ;;
+        esac
+      done
+    fi
+    if [[ -z "$BERGAMOT_BUILD_DIR" ]]; then
+      echo "[FAIL] 找不到 Bergamot 构建目录（$BERGAMOT_PARENT/build-android*）" >&2
+      exit 1
+    fi
+    BERGAMOT_LIST="$BERGAMOT_BUILD_DIR/bergamot_libs.txt"
+    # 生成链接清单（build.rs 按它翻译成 rustc-link-* 指令）
+    python "$SCRIPT_DIR/gen_bergamot_libs.py" "$BERGAMOT_BUILD_DIR" "$BERGAMOT_LIST" \
+      || { echo "[FAIL] 生成 Bergamot 链接清单失败" >&2; exit 1; }
+  else
+    echo "[INFO] 复用已有 Bergamot 产物（--rebuild-bergamot 可强制重建）"
+  fi
+  export BERGAMOT_LIBS_LIST="$BERGAMOT_LIST"
+  export BERGAMOT_SRC_DIR="$REPO/third_party/bergamot-translator"
 fi
 
 # sherpa shared 链接目录（sys crate 用它跳过下载；运行期 rpath=$ORIGIN 解析）

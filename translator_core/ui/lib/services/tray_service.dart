@@ -133,6 +133,27 @@ class TrayService with TrayListener {
   /// 点 ✕ 走退出流程（保存后退出），与托盘「退出程序」一致。
   /// 传 true 则点 ✕ 缩到通知栏继续转写。
   Future<void> init({bool minimizeToTray = false}) async {
+    // ⚠️ 2026-10-27 修复：Android 上**不能**碰 TrayManager。
+    //
+    // 现象：Android 启动即报
+    //   "Couldn't resolve native function 'native_tray_manager_is_supported'
+    //    in 'package:cnativeapi/cnativeapi.dart'
+    //    : dlopen failed: library 'libc++_shared.so' not found:
+    //    needed by .../lib/arm64-v8a/libcnativeapi.so"
+    //
+    // 根因：tray_manager 0.8.0 依赖 nativeapi_flutter → cnativeapi，
+    // 其 `libcnativeapi.so` 链接的是 **libc++_shared.so**（NDK 的共享
+    // C++ 运行库），而该 so 并不在 APK 里（我们只提供了 Rust 三库 +
+    // 自己编的 native_bridge）。只要 Dart 侧触碰 `TrayManager.instance`，
+    // 插件就会去 dlopen 这个 so → 失败 → 抛 platform error。
+    //
+    // 处理：Android/移动端**根本用不到系统托盘**（那是 Windows 桌面能力），
+    // 直接在入口处短路，不进插件代码。桌面端行为完全不变。
+    if (!Platform.isWindows) {
+      debugPrint('[tray] 非 Windows 平台，跳过托盘初始化');
+      return;
+    }
+
     if (!TrayManager.instance.isSupported) {
       debugPrint('[tray] 当前平台不支持系统托盘，跳过');
       return;
@@ -289,6 +310,13 @@ class TrayService with TrayListener {
   /// **不生效**（点了托盘、状态也翻了，窗口就是不出现/不消失）。
   /// 改用 Win32 `ShowWindow(SW_SHOW/SW_RESTORE)` 直调，已实测有效。
   Future<void> showWindow() async {
+    // ⚠️ 2026-10-27：Android 上没有 Win32 窗口句柄概念。
+    // `_mainHwnd()` 会调 `windowManager.getId()`（移动端抛异常）与
+    // `win.GetForegroundWindow()`（Win32 符号在 Android 动态库里不存在）
+    // → 直接抛 MissingPluginException / 符号解析失败。
+    // 移动端「显示窗口」= 什么都不做（应用本来就在前台）。
+    if (!Platform.isWindows) return;
+
     final h = await _mainHwnd();
     debugPrint('[tray] 显示窗口 hwnd=$h');
     if (h != 0) {
@@ -370,6 +398,10 @@ class TrayService with TrayListener {
   ///    close/destroy 在本窗口上实测不生效）
   /// 3. 连句柄都拿不到 → 撤掉 `preventClose`，让默认关闭路径生效
   void handleWindowCloseSync() {
+    // ⚠️ 2026-10-27：Android 无 Win32 句柄，撤掉拦截即可
+    // （移动端点 ✕ 直接走系统默认销毁 Activity）。
+    if (!Platform.isWindows) return;
+
     _diagLog('关闭请求（同步路径）');
     final h = _mainHwndSync();
     _diagLog('句柄 h=$h');

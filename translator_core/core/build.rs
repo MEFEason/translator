@@ -243,6 +243,21 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CMAKE");
     println!("cargo:rerun-if-changed=csrc/bergamot_c_api.cpp");
 
+    // ★ Android cdylib 必须显式带 SONAME（2026-10-28 真机闪退教训）。
+    //
+    // 现象：libnative_bridge.so 的 DT_NEEDED 里记的不是 "libtranslator_core.so"
+    // 而是**构建机的完整路径**（C:/Users/.../jniLibs/arm64-v8a/libtranslator_core.so）
+    // —— 设备上 dlopen 必失败：
+    //   "dlopen failed: library "C:/Users/..." not found: needed by base.apk!/lib/.../libnative_bridge.so"
+    //
+    // 根因：Rust 的 cdylib 在 Linux/Android 工具链下**默认不写 SONAME**，
+    // CMake 链接 IMPORTED SHARED 时，没有 SONAME 就把文件路径原样记进 NEEDED。
+    // 修复：链接时补 -soname，让产物声明自己的逻辑名；
+    // 之后 CMake 链接会记 "libtranslator_core.so"，运行时在 APK lib 目录解析成功。
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+        println!("cargo:rustc-link-arg=-Wl,-soname,libtranslator_core.so");
+    }
+
     let _target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
     // ★★ sherpa-onnx-c-api.dll 必须 **delay-load** ★★
@@ -287,6 +302,31 @@ fn main() {
     // 纯 Rust 交叉编译（如 Android NDK 构建的 host 侧）可跳过
     if std::env::var("MEFEASON_BUILD_NATIVE").as_deref() == Ok("0") {
         println!("cargo:warning=MEFEASON_BUILD_NATIVE=0，跳过 Bergamot 原生构建");
+        return;
+    }
+
+    // ★★★ Android（arm64）交叉编译路径（2026-10-28）★★★
+    //
+    // 与桌面端（MSVC / Windows）**完全不同的机制**：
+    //
+    // - 桌面端：BERGAMOT_PREBUILT 指向 MSVC 静态库目录，
+    //   从 build.ninja 读 `app/bergamot.exe` 的 LINK_LIBRARIES 拿全量清单；
+    // - Android 端：交叉编译产物在 `build-android/`，且我们用
+    //   `COMPILE_LIBRARY_ONLY=ON`（只要库，不要 app 可执行文件）
+    //   → **没有 bergamot.exe 目标可读**。
+    //
+    // 故 Android 走「清单文件」路线：交叉编译脚本
+    // （Android/scripts/build_bergamot_android.sh）用
+    // `gen_bergamot_libs.py` 从 build.ninja 递归解析依赖图，
+    // 导出 `bergamot_libs.txt`（每行一个 .a 的绝对路径，
+    // 顺序 = CMake 的拓扑序 = 正确的静态链接顺序）。
+    // build.rs 读它并翻译成 rustc-link-* 指令。
+    //
+    // ⚠️ 为什么不合并成一个 .a：llvm-ar 的 MRI 模式在 Windows 上
+    //    对含非 ASCII 字符的路径**静默失败**（rc=0、无输出文件），
+    //    本仓库路径正好命中。绕开比硬啃更划算。
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+        link_android();
         return;
     }
 
@@ -378,8 +418,44 @@ fn build_c_api(src: &Path) {
     // Rust 侧由 .cargo/config.toml 的 `crt-static`（-C target-feature=+crt-static）
     // 对齐，否则链接期 LNK2038「RuntimeLibrary 不匹配」。
     // cc crate 默认 /MD → 必须显式改 /MT。
-    if cfg!(windows) && cfg!(target_env = "msvc") {
+    //
+    // ⚠️⚠️ 这里**必须用 CARGO_CFG_TARGET_* 环境变量判断，不能用 `cfg!()`**：
+    //   build.rs 是给 **host** 编译的（`cfg!(windows)` 求值的是构建机，
+    //   在本机恒为 true！）→ 交叉编译 Android 时会给 NDK clang 传 `/MT`，
+    //   clang 不认 MSVC 的 /MT → "clang++: error: no such file or
+    //   directory: '/MT'"，整个构建失败（2026-10-28 实测）。
+    //
+    //   正确写法：读 Cargo 注入的 target 配置环境变量。
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if target_os == "windows" && target_env == "msvc" {
         build.flag("/MT");
+    }
+
+    // ★ ARM 目标必须补 `ARM FMA SSE` 三个宏（2026-10-28）。
+    //
+    // 原因链（本项目实测踩过）：
+    // 1. marian 的 `functional/operators.h` 按**编译器宏** `__ARM_NEON`
+    //    判断走 ARM 分支 → include `simd_utils/simd_utils.h`；
+    // 2. 但 `simd_utils_constants.h` 内部是按 **`-DSSE` 宏**决定要不要
+    //    include `sse2neon_wrapper.h`（x86 SSE → ARM NEON 转译层）；
+    // 3. 缺 -DSSE → 不 include → `_mm_add_ps` / `_mm_mul_ps` /
+    //    `sin_ps` 等全部未声明 → 编译报"use of undeclared identifier"。
+    //
+    // 为什么 x86 上不需要：那时 `operators.h` 走 `#include <immintrin.h>`
+    //（编译器原生 SSE），压根不碰 sse2neon。
+    //
+    // 为什么 CMake 里已经设过了还要在这里设：CMake 的
+    // `add_compile_definitions(ARM FMA SSE)` 只作用于 **marian 目录作用域**，
+    // 而本包装层是 Rust 侧独立编译的（cc crate），拿不到那些宏。
+    if target_os == "android" || target_os == "linux" {
+        let is_arm = std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64")
+            || std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("arm");
+        if is_arm {
+            build.define("ARM", None);
+            build.define("FMA", None);
+            build.define("SSE", None);
+        }
     }
     build.include(src); // 仓库根：解析 "3rd_party/marian-dev/src/..." 形式
     build.include(src.join("src"));
@@ -414,6 +490,233 @@ fn build_c_api(src: &Path) {
     println!("cargo:rustc-link-lib=static:+whole-archive=bergamot_c_api");
 
     println!("cargo:warning=Bergamot C ABI 包装层已编译（whole-archive）");
+}
+
+/// Android（arm64）交叉编译的链接路径（2026-10-28）。
+///
+/// ## 流程
+///
+/// 1. 读 `bergamot_libs.txt`（由 `Android/scripts/gen_bergamot_libs.py`
+///    从 CMake 的 `build.ninja` 递归解析依赖图导出）；
+/// 2. 编译 C ABI 包装层（`csrc/bergamot_c_api.cpp`）；
+/// 3. 按清单顺序逐个声明静态库。
+///
+/// ## 为什么要 whole-archive
+///
+/// Rust 把 rlib 排在所有 native static lib **之后**。包装层在 rlib 里，
+/// 它对 Bergamot 主库的符号引用要等扫到主库时才进未决表 ——
+/// 若主库此时已被扫过（obj 未被拉入），就 LNK2019「未定义符号」。
+/// `+whole-archive` 强制拉入主库全部 obj（主库很小，代价可忽略）。
+///
+/// ## 顺序
+///
+/// 清单顺序 = CMake 的拓扑序 = 「引用者在前、被引用者在后」，
+/// 这正是静态链接需要的顺序。
+///
+/// ## 为什么**要**链 sentencepiece
+///
+/// Windows 端**不能**链 sentencepiece —— sherpa-onnx 的 static 库里
+/// 带了一份完整的 sentencepiece + protobuf-lite，符号完全相同 → LNK2005。
+/// 但 Android 端 sherpa 用的是 **shared** 包（`libsherpa-onnx-c-api.so`），
+/// 不含 sentencepiece → **必须**链，否则翻译器初始化时缺符号。
+fn link_android() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| manifest.clone());
+    let bergamot_src = repo_root.join("third_party/bergamot-translator");
+
+    // 清单：交叉编译脚本产出
+    let list_path = std::env::var("BERGAMOT_LIBS_LIST")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| bergamot_src.join("build-android/bergamot_libs.txt"));
+
+    let Ok(text) = std::fs::read_to_string(&list_path) else {
+        println!(
+            "cargo:warning=读不到 Bergamot 链接清单 {}，链接会失败。\n\
+             请先执行：bash Android/scripts/build_bergamot_android.sh",
+            list_path.display()
+        );
+        return;
+    };
+
+    // 编译 C ABI 包装层（必须 whole-archive，且排在主库之前）
+    build_c_api(&bergamot_src);
+
+    let mut n = 0usize;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let p = PathBuf::from(line);
+        let Some(file_name) = p.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // libfoo.a → foo
+        let stem = file_name
+            .trim_start_matches("lib")
+            .trim_end_matches(".a");
+        if stem.is_empty() {
+            continue;
+        }
+        let Some(dir) = p.parent() else { continue };
+        println!("cargo:rustc-link-search=native={}", dir.display());
+
+        if stem == "bergamot-translator" {
+            // 主库：whole-archive 强制拉入全部 obj
+            println!("cargo:rustc-link-lib=static:+whole-archive=bergamot-translator");
+        } else {
+            println!("cargo:rustc-link-lib=static={stem}");
+        }
+        n += 1;
+    }
+
+    // ★ 补 C++ 标准库（Android）。
+    //
+    // 为什么必须手动加：`build_c_api` 里用了 `build.cargo_metadata(false)`
+    // 来抑制 cc crate 输出自己的 link 指令（因为我们要输出
+    // `+whole-archive` 版本）。但 cc crate 在 Android 上本来会自动输出
+    // `cargo:rustc-link-lib=static=c++_static`（NDK 默认静态 STL），
+    // 一并被抑制了 → 链接期报一堆
+    // "undefined symbol: std::__ndk1::basic_istream<...>::read"
+    // / "operator new(unsigned long)" / "__cxa_throw" 等。
+    //
+    // 静态库列表（Bergamot 全树）用的就是 c++_static，
+    // 故这里也必须链 c++_static（不能混 c++_shared）。
+    //
+    // 位置：必须**在** Bergamot 静态库**之后**声明 ——
+    // 静态链接对顺序敏感（引用者在前、被引用者在后），
+    // 而 Bergamot 的 obj 引用 C++ 标准库符号。
+    if target_os == "android" {
+        if let Some(ndk) = android_ndk_root() {
+            let lib_dir = ndk.join(
+                "toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android",
+            );
+            if lib_dir.is_dir() {
+                println!("cargo:rustc-link-search=native={}", lib_dir.display());
+                // NDK 的 C++ 运行时拆成两个归档（LLVM 17+）：
+                //   libc++_static.a —— C++ 标准库本体（容器、算法、iostream…）
+                //   libc++abi.a    —— ABI 层（__cxa_throw / __cxa_allocate_exception /
+                //                      typeinfo / vtable / unwinder 胶水）
+                // 只链前者会缺一大批 undefined symbol（std::terminate、
+                // __cxa_throw、typeinfo for std::bad_alloc…）→ 两个都要链。
+                //
+                // ⚠️ 顺序：libc++_static 在前、libc++abi 在后 ——
+                //    静态链接对顺序敏感（引用者在前、被引用者在后）。
+                println!("cargo:rustc-link-lib=static=c++_static");
+                println!("cargo:rustc-link-lib=static=c++abi");
+
+                // ★ compiler-rt builtins：ARM 栈保护的配套符号。
+                //
+                // 现象：链接期报 "undefined symbol: __arm_za_disable"。
+                // 原因：NDK r30 的 clang 默认启用 ARM 的
+                // `-mstack-protector-guard=tz`（zone-based 栈保护），
+                // 被保护的函数会引用 `__arm_za_disable` /
+                // `__stack_chk_fail` 这类 helper。
+                // 这些 helper 定义在 **compiler-rt** 里
+                // （`libclang_rt.builtins-aarch64-android.a`），
+                // 而 Rust 的链接命令行不会自动加它。
+                //
+                // 路径：<ndk>/toolchains/llvm/prebuilt/<host>/lib/clang/<ver>/lib/linux/
+                // 版本号会随 NDK 变 → 用通配扫一遍取第一个匹配。
+                if let Some(rt) = find_compiler_rt(&ndk) {
+                    println!("cargo:rustc-link-search=native={}", rt.parent().unwrap().display());
+                    println!("cargo:rustc-link-lib=static=clang_rt.builtins-aarch64-android");
+                } else {
+                    println!("cargo:warning=未找到 compiler-rt builtins，ARM 栈保护符号可能缺失");
+                }
+            } else {
+                println!(
+                    "cargo:warning=NDK C++ 库目录不存在：{}",
+                    lib_dir.display()
+                );
+            }
+        } else {
+            println!("cargo:warning=找不到 ANDROID_NDK，无法链接 c++_static");
+        }
+    }
+
+    // ★ Bionic 的 libc.a 自带 `rust_eh_personality` → 与 Rust std 重复。
+    //
+    // 现象：链接期报
+    //   "duplicate symbol: rust_eh_personality
+    //    >>> defined at gcc.rs:329 (library/std/src/sys/personality/gcc.rs:329)
+    //    >>> defined at gcc.rs:217 (prebuilts/rust-toolchain/…/gcc.rs:217)"
+    // 后者来自 NDK 的 `sysroot/usr/lib/aarch64-linux-android/libc.a`。
+    //
+    // 根因：LLVM 17 起 bionic 为了兼容 Rust，在 libc.a 里也提供了
+    // `rust_eh_personality`（Rust 侧 personality 的 C ABI 适配器）。
+    // 而 Rust std 自己也有一个 → 两者定义**同一个符号**。
+    //
+    // 这是 **NDK 官方记录的已知冲突**，官方推荐的处理就是
+    // `-Wl,--allow-multiple-definition`：两边的实现都只是把
+    // unwinding 转交给 `__cxa_*` / `_Unwind_*` 的薄适配层，行为等价，
+    // 选哪个都不影响 Rust 的 panic 语义。
+    //
+    // 为什么以前没遇到：Android 端此前没链任何 C++ 静态库
+    // （mt-bergamot 未启用）→ 根本不需要 bionic 之外的 C++ 运行时，
+    // 也就没把 libc.a 拉进来与 Rust std 撞车。
+    println!("cargo:rustc-link-arg=-Wl,--allow-multiple-definition");
+
+    println!("cargo:warning=Bergamot Android 链接清单已应用（{n} 个静态库）");
+}
+
+/// 在 NDK 里定位 compiler-rt builtins 库（`libclang_rt.builtins-aarch64-android.a`）。
+///
+/// ## 为什么需要扫目录
+///
+/// 路径里的 clang 版本号随 NDK 变化（r27c 是 18、r30 是 21…）：
+///   <ndk>/toolchains/llvm/prebuilt/<host>/lib/clang/<ver>/lib/linux/
+/// 硬编码版本号会在 NDK 升级时失效 → 扫 `lib/clang/*/lib/linux/` 取第一个匹配。
+fn find_compiler_rt(ndk: &Path) -> Option<PathBuf> {
+    let clang_dir = ndk.join("toolchains/llvm/prebuilt");
+    let host_dir = std::fs::read_dir(&clang_dir).ok()?;
+    for host in host_dir.flatten() {
+        let versions = host.path().join("lib/clang");
+        let Ok(vers) = std::fs::read_dir(&versions) else { continue };
+        for v in vers.flatten() {
+            let cand = v
+                .path()
+                .join("lib/linux/libclang_rt.builtins-aarch64-android.a");
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    None
+}
+
+/// 定位 NDK 根目录（用于找 `libc++_static.a`）。
+///
+/// 优先用 `ANDROID_NDK` 环境变量（交叉编译脚本会导出）；
+/// 缺失时从 `CC_aarch64_linux_android` 之类的编译器路径反推
+/// （`<ndk>/toolchains/llvm/prebuilt/<host>/bin/clang`）。
+fn android_ndk_root() -> Option<PathBuf> {
+    if let Ok(ndk) = std::env::var("ANDROID_NDK") {
+        let p = PathBuf::from(&ndk);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    // 反推：<ndk>/toolchains/llvm/prebuilt/<host>/bin/<cc>
+    for key in [
+        "CC_aarch64_linux_android",
+        "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER",
+    ] {
+        let Ok(cc) = std::env::var(key) else { continue };
+        let p = PathBuf::from(&cc);
+        // .../toolchains/llvm/prebuilt/<host>/bin/<name>
+        let Some(prebuilt) = p.parent().and_then(|d| d.parent()) else { continue };
+        let Some(toolchains) = prebuilt.parent() else { continue };
+        let Some(root) = toolchains.parent() else { continue };
+        if root.join("toolchains").is_dir() {
+            return Some(root.to_path_buf());
+        }
+    }
+    None
 }
 
 fn link_static() {
@@ -508,7 +811,11 @@ fn build_with_cmake(src: &Path) {
     }
 
     // 产物路径各平台不同
-    let lib_dir = if cfg!(windows) {
+    // ⚠️ 必须按 **target** 判断（CARGO_CFG_TARGET_OS），不能用 `cfg!(windows)`
+    //    —— build.rs 是给 host 编译的，`cfg!` 求值的是构建机。
+    let target_is_windows =
+        std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+    let lib_dir = if target_is_windows {
         build_dir.join("Release")
     } else {
         build_dir.clone()
@@ -677,9 +984,11 @@ fn link_all(build_dir: &Path) {
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
-        let name = if cfg!(windows) {
+        let name = if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+            // Windows 静态库名无 lib 前缀（bergamot-translator.lib）
             stem
         } else {
+            // Unix 风格有 lib 前缀（libfoo.a → foo）
             stem.strip_prefix("lib").unwrap_or(&stem).to_string()
         };
         if emitted.contains(&name) {

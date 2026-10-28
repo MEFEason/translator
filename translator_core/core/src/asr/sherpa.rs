@@ -54,6 +54,16 @@ impl SherpaBackend {
         // 也要用同一套规则判定「模型是否就位」，避免两处规则漂移。
         let files = crate::modelspec::probe_asr_dir(&cfg.model_dir)?;
 
+        // ⚠️ 2026-10-27：真机可观测性。Android 上 eprintln! 不进 logcat，
+        // 模型加载耗时/失败原因完全看不到（实测卡了 30 秒以上无任何线索）。
+        // 用 alog! 走 __android_log_write，tag=translator_core。
+        crate::alog!(
+            "ASR 加载开始 dir={} threads={} provider={}",
+            cfg.model_dir.display(),
+            cfg.num_threads,
+            cfg.provider
+        );
+
         let mut c = sherpa_onnx::OnlineRecognizerConfig::default();
         c.model_config.transducer.encoder = Some(files.encoder);
         c.model_config.transducer.decoder = Some(files.decoder);
@@ -93,6 +103,8 @@ impl SherpaBackend {
 
         let recognizer = sherpa_onnx::OnlineRecognizer::create(&c)
             .ok_or_else(|| Error::EngineInit("OnlineRecognizer::create 返回 None".into()))?;
+
+        crate::alog!("ASR 加载完成（OnlineRecognizer 就绪）");
 
         Ok(Self {
             recognizer: Arc::new(recognizer),

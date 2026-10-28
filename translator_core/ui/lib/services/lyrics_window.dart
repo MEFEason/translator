@@ -38,7 +38,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:win32/win32.dart' as win;
-import 'package:window_manager/window_manager.dart';
 
 /// 共享字幕文件路径（主实例写、歌词实例读）。
 String lyricsSharedPath() {

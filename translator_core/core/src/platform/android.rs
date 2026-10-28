@@ -409,11 +409,63 @@ impl SystemAudioCapture for ExternalPushCapture {
 ///
 /// ⚠️ 2026-10-26 修复：旧实现在 `capture-android` feature 下引用
 /// 不存在的 `android_log` crate —— 该 feature 一开就编译失败，
-/// 也从没被任何构造路径用上所以从未暴露。Android 上 stderr
-/// 由 zygote 重定向进 logcat（tag=libc），eprintln! 即可观测。
+/// 也从没被任何构造路径用上所以从未暴露。
+///
+/// ⚠️ 2026-10-27 再修复：**Android 上 `eprintln!` 完全不进 logcat**
+/// （实测 0 行）。旧注释说「stderr 由 zygote 重定向进 logcat（tag=libc）」
+/// 是**错的** —— 那是 zygote 自己的 stderr，应用进程的 stderr 会被
+/// zygote 丢弃。结果：Rust 侧的任何诊断信息（含模型加载失败原因）
+/// 在真机日志里**完全看不到**，只能靠猜。
+///
+/// 改用 `__android_log_write`（libc 自带的系统日志接口，不引入任何依赖）：
+/// 真机可用 `adb logcat -s translator_core:V` 直接观察。
 fn tracing_warn(msg: &str) {
-    eprintln!("[translator_core][android] {msg}");
-    let _ = msg;
+    android_log("W", msg);
+}
+
+/// 写一条 Android 系统日志（tag = `translator_core`）。
+///
+/// 走 `__android_log_write`（NDK 的 liblog 里导出，无需 crate 依赖）。
+/// 非 Android 平台退化为 `eprintln!`（桌面端 stderr 可见）。
+pub fn android_log(level: &str, msg: &str) {
+    #[cfg(target_os = "android")]
+    {
+        use std::ffi::CString;
+        // ANDROID_LOG_INFO = 4, ANDROID_LOG_WARN = 5, ANDROID_LOG_ERROR = 6
+        let prio = match level {
+            "E" => 6,
+            "W" => 5,
+            _ => 4,
+        };
+        let tag = c"translator_core";
+        let text = match CString::new(msg) {
+            Ok(t) => t,
+            Err(_) => return, // 内含 NUL → 丢弃
+        };
+        // __android_log_write(prio, tag, text)
+        unsafe extern "C" {
+            fn __android_log_write(
+                prio: std::os::raw::c_int,
+                tag: *const std::os::raw::c_char,
+                text: *const std::os::raw::c_char,
+            ) -> std::os::raw::c_int;
+        }
+        unsafe {
+            __android_log_write(prio, tag.as_ptr(), text.as_ptr());
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        eprintln!("[translator_core][{level}] {msg}");
+    }
+}
+
+/// 便捷宏：Android 上打 INFO 级日志（桌面端退化为 eprintln!）。
+#[macro_export]
+macro_rules! alog {
+    ($($arg:tt)*) => {
+        $crate::platform::android::android_log("I", &format!($($arg)*))
+    };
 }
 
 /// Android 权限门控

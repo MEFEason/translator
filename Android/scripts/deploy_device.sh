@@ -7,8 +7,13 @@
 #              + flutter build apk --debug
 #
 # ## 模型推送
-# 模型不进 APK（162MB 会让安装极慢），用 adb push 送到应用外部私有目录：
-#   /sdcard/Android/data/com.translator.app.debug/files/models/
+# 模型不进 APK（162MB 会让安装极慢），用 adb push 送到应用**内部私有目录**：
+#   /data/data/com.translator.app.debug/files/models/
+#
+# 流程是「push 到 /data/local/tmp → run-as 拷进内部目录」，两个原因：
+#   1) 大文件直推 /sdcard 会 EOF 中断（Android 14 FUSE 限制）
+#   2) 直推 /sdcard 的文件属主是 shell，应用读不到（errno 13）
+# 详见下方「推送模型」段的完整说明。
 #
 # ⚠️ 包名带 `.debug` 后缀（build.gradle.kts 的 applicationIdSuffix），
 #    装机后包名不同，push 路径也要跟着变 —— 本脚本自动按实际包名推导。
@@ -68,25 +73,82 @@ echo "[INFO] 安装 $(basename "$APK") ..."
 "$ADB" -s "$SERIAL" install -r -t "$APK"
 
 # ── 推送模型 ───────────────────────────────────────────
+#
+# ## 为什么不用「adb push 直接到应用目录」
+#
+# 两个硬约束（都是本机实测踩过的坑）：
+#
+# 1) **大文件推 /sdcard 会 EOF 中断**
+#    "adb push: copy response: EOF" —— Android 14 的 FUSE/sdcardfs 对
+#    大文件写入的限制，与 USB 速度无关（155MB / 3.7 秒可推 tmp，推 sdcard 即断）。
+#    → 必须先推 /data/local/tmp 再在设备侧搬。
+#
+# 2) **推 /sdcard 后应用读不到（errno 13）**
+#    `adb push` 的文件属主是 **shell**，目录权限 `drwxrws--- shell ext_data_rw`；
+#    应用（属主 u0_xxx）既不是 owner 也不在 ext_data_rw 组 → 访问被拒：
+#      "FileSystemException: Exists failed ... Permission denied, errno = 13"
+#    而且 `Directory.existsSync()` 在无权访问时**抛异常**而非返回 false
+#    → 整个 bootstrap 被中断（界面永远「加载中」）。
+#
+# → 正确做法：**推 /data/local/tmp → `run-as` 拷进内部私有目录**。
+#    内部目录属主天然是应用 UID，无需任何 chmod。
+#
 if [[ "$PUSH_MODELS" == "1" ]]; then
-  TARGET="/sdcard/Android/data/$PKG/files/models"
-  echo "[INFO] 推送模型到 $TARGET"
-  "$ADB" -s "$SERIAL" shell mkdir -p "$TARGET" 2>/dev/null || true
-  # ASR：整目录推（含下一层的模型子目录）
-  "$ADB" -s "$SERIAL" push "$REPO/models/asr" "$TARGET/" >/dev/null
-  echo "  [OK] ASR 模型"
+  STAGE="/data/local/tmp/tmodels"
+  echo "[INFO] 推送模型（先到 $STAGE，再 run-as 搬进应用私有目录）"
+  "$ADB" -s "$SERIAL" shell "rm -rf $STAGE && mkdir -p $STAGE" >/dev/null 2>&1 || true
+
+  push_model() {
+    local src="$1" label="$2"
+    if [[ ! -d "$src" ]]; then
+      echo "  [--] $label 不存在（$src），跳过"
+      return 0
+    fi
+    echo "  [..] $label → $STAGE"
+    # -r 递归；失败不退出脚本（后面统一报错）
+    if ! "$ADB" -s "$SERIAL" push "$src" "$STAGE/" >/dev/null 2>&1; then
+      echo "  [FAIL] $label 推送失败"
+      return 1
+    fi
+    echo "  [OK] $label 已到 tmp"
+    return 0
+  }
+
+  FAIL=0
+  push_model "$REPO/models/asr" "ASR 模型" || FAIL=1
   if [[ "$PUSH_MT" == "1" ]]; then
-    "$ADB" -s "$SERIAL" push "$REPO/models/mt" "$TARGET/" >/dev/null
-    echo "  [OK] MT 权重"
+    push_model "$REPO/models/mt" "MT 权重" || FAIL=1
   else
     echo "  [--] MT 权重未推（阶段1：仅识别模式，UI 会明示「翻译引擎未启用」）"
   fi
-  # 词库（可选）
-  if [[ -d "$REPO/models/glossary" ]]; then
-    "$ADB" -s "$SERIAL" push "$REPO/models/glossary" "$TARGET/" >/dev/null
-    echo "  [OK] 词库"
+  push_model "$REPO/models/glossary" "词库" || FAIL=1
+
+  if [[ "$FAIL" == "1" ]]; then
+    echo "[FAIL] 模型推送失败，未执行搬运" >&2
+    exit 1
   fi
-  echo "[INFO] 推送完成（首次 162MB，视 USB 速度约 10-60 秒）"
+
+  echo "[INFO] 搬运到应用内部私有目录（run-as，属主=应用 UID）"
+  "$ADB" -s "$SERIAL" shell "run-as $PKG mkdir -p files/models" >/dev/null 2>&1 || true
+  for name in asr glossary; do
+    if "$ADB" -s "$SERIAL" shell "run-as $PKG sh -c 'test -d $STAGE/$name'" >/dev/null 2>&1; then
+      if "$ADB" -s "$SERIAL" shell "run-as $PKG sh -c 'rm -rf files/models/$name && cp -r $STAGE/$name files/models/'" >/dev/null 2>&1; then
+        SIZE=$("$ADB" -s "$SERIAL" shell "run-as $PKG du -sh files/models/$name" 2>/dev/null | awk '{print $1}')
+        echo "  [OK] $name → files/models/$name ($SIZE)"
+      else
+        echo "  [FAIL] $name 搬运失败" >&2
+        exit 1
+      fi
+    fi
+  done
+  if [[ "$PUSH_MT" == "1" ]]; then
+    "$ADB" -s "$SERIAL" shell "run-as $PKG sh -c 'rm -rf files/models/mt && cp -r $STAGE/mt files/models/'" >/dev/null 2>&1 && \
+      echo "  [OK] mt → files/models/mt" || echo "  [FAIL] mt 搬运失败" >&2
+  fi
+
+  # 清 tmp（162MB 别留在设备上）
+  "$ADB" -s "$SERIAL" shell "rm -rf $STAGE" >/dev/null 2>&1 || true
+  echo "[INFO] 模型就位（应用内部私有目录，无需 chmod）"
 fi
 
 # ── 冒烟检查 ───────────────────────────────────────────

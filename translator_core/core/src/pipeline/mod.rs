@@ -72,6 +72,19 @@ impl SourceKind {
     }
 }
 
+/// 采集源类型 → 声源类型。
+///
+/// 两者语义一一对应（内放 ↔ SystemAudio，麦克风 ↔ Microphone），
+/// 但分属两层（采集层 / 字幕层），故显式转换而不是混用同一个枚举。
+impl From<crate::config::CaptureSource> for SourceKind {
+    fn from(src: crate::config::CaptureSource) -> Self {
+        match src {
+            crate::config::CaptureSource::SystemAudio => SourceKind::SystemAudio,
+            crate::config::CaptureSource::Microphone => SourceKind::Microphone,
+        }
+    }
+}
+
 /// 一个声源的配置
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSpec {

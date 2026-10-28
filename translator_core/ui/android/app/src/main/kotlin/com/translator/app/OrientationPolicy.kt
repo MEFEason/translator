@@ -71,12 +71,31 @@ object OrientationPolicy {
      * 判定以 **Kotlin 为唯一权威**（Dart 侧拿不到 `smallestScreenWidthDp`），
      * 避免 Dart 用「窗口短边」猜出与 Android 不一致的结果
      * （例如手机分屏时窗口变宽被误判成平板 → 导航栏形态突变）。
+     *
+     * ## 性能字段（2026-10-28 任务 #23：Android 线程调整器）
+     *
+     * Windows 端的档位是「用户手选 + 桌面占用基准」，Android 没有那套
+     * 基准数据，改用**硬件画像**推导默认线程数：
+     * - `cores`：Runtime 可见核数（big.LITTLE 下常只报大核或全部，
+     *   与 /system/devices 口径有差异，但足以分档）
+     * - `ramMb`：应用可用堆外的物理内存近似（ActivityManager.memoryClass
+     *   不可靠，用 totalMem）
+     * - `lowRam`：系统 lowMemoryDevice 标记（Go 版设备 true）
+     * 产品定位（MEMORY：会议字幕跟手是核心价值）→ **默认满档**，
+     * 只有 lowRam 或核数极少时才降档。
      */
     fun profileOf(activity: Activity): Map<String, Any> {
         val config = activity.resources.configuration
+        val am = activity.getSystemService(android.content.Context.ACTIVITY_SERVICE)
+            as android.app.ActivityManager
+        val memInfo = android.app.ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+        val cores = Runtime.getRuntime().availableProcessors()
         return mapOf(
             "isTablet" to isTablet(config),
             "smallestWidthDp" to config.smallestScreenWidthDp,
+            "cores" to cores,
+            "ramMb" to (memInfo.totalMem / 1024 / 1024),
+            "lowRam" to am.isLowRamDevice,
         )
     }
 }

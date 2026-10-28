@@ -37,6 +37,16 @@
     <!-- 通知（前台服务必须显示） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- 悬浮字幕窗（2026-10-28 任务 #24）：TYPE_APPLICATION_OVERLAY。
+         ⚠️ 该权限不走运行时弹窗，须跳系统设置页手动授予
+         （Settings.ACTION_MANAGE_OVERLAY_PERMISSION），见 SubtitleOverlayService -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- 字幕服务的前台类型 = specialUse（Android 14 起 startForeground
+         必须带类型，无类型 = MissingForegroundServiceTypeException 闪退，
+         2026-10-28 实测）。specialUse 要求 PROPERTY 说明用途。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
     <application
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
@@ -113,12 +123,34 @@
             android:exported="false"
             android:foregroundServiceType="mediaProjection|microphone" />
 
+        <!-- 悬浮字幕窗服务（任务 #24）：Android 14 起 startForeground
+             必须带类型 → specialUse（字幕 Overlay 不属于任何标准 FGS 类型）。
+             缺类型 = MissingForegroundServiceTypeException 闪退（2026-10-28 实测） -->
+        <service
+            android:name=".SubtitleOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="实时会议字幕悬浮窗" />
+        </service>
+
         <!-- MediaProjection 授权回调 -->
         <activity
             android:name=".ProjectionPermissionActivity"
             android:exported="true"
             android:excludeFromRecents="true"
             android:resizeableActivity="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- 转写导出：SAF「另存为」对话框宿主（2026-10-28 用户需求）。
+             ACTION_CREATE_DOCUMENT 必须由 Activity 发起，用户选完目录后
+             系统回一个可写 URI，本 Activity 写入并关掉。
+             ⚠️ 不用任何存储权限 —— SAF 自带授权。 -->
+        <activity
+            android:name=".ExportSaveAsActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
     </application>

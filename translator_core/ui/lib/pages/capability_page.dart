@@ -77,65 +77,86 @@ class CapabilityPage extends StatelessWidget {
                 onChanged: (v) => state.setLyricsWindowEnabled(v),
               ),
               // 关闭窗口时的行为（2026-10-25 用户要求「参考大厂」）
-              RadioListTile<String>(
-                dense: true,
-                secondary: const Icon(Icons.help_outline),
-                title: const Text('关闭时询问'),
-                subtitle: const Text(
-                  '点 ✕ 弹出选择框：最小化到通知栏，还是退出程序（推荐）',
-                  style: TextStyle(fontSize: 11),
+              //
+              // ⚠️ 2026-10-28 用户：这是 **Windows 端**的交互。
+              // Android 上点 ✕ 走系统默认（Activity 退到后台）+ 常驻通知，
+              // 不做「询问 / 最小化 / 退出」三选一 —— 那是桌面托盘的产品形态，
+              // 手机上弹窗询问反而是倒退。故整块仅桌面端显示。
+              if (!Platform.isAndroid) ...[
+                RadioListTile<String>(
+                  dense: true,
+                  secondary: const Icon(Icons.help_outline),
+                  title: const Text('关闭时询问'),
+                  subtitle: const Text(
+                    '点 ✕ 弹出选择框：最小化到通知栏，还是退出程序（推荐）',
+                    style: TextStyle(fontSize: 11),
+                  ),
+                  value: 'ask',
+                  // ignore: deprecated_member_use
+                  groupValue: state.closeAction,
+                  // ignore: deprecated_member_use
+                  onChanged: (v) {
+                    if (v != null) state.setCloseAction(v);
+                  },
                 ),
-                value: 'ask',
-                // ignore: deprecated_member_use
-                groupValue: state.closeAction,
-                // ignore: deprecated_member_use
-                onChanged: (v) {
-                  if (v != null) state.setCloseAction(v);
-                },
-              ),
-              RadioListTile<String>(
-                dense: true,
-                secondary: const Icon(Icons.notifications_active_outlined),
-                title: const Text('最小化到通知栏'),
-                subtitle: const Text(
-                  '点 ✕ 不退出，缩到通知栏继续转写；左键点图标恢复窗口，右键出菜单',
-                  style: TextStyle(fontSize: 11),
+                RadioListTile<String>(
+                  dense: true,
+                  secondary: const Icon(Icons.notifications_active_outlined),
+                  title: const Text('最小化到通知栏'),
+                  subtitle: const Text(
+                    '点 ✕ 不退出，缩到通知栏继续转写；左键点图标恢复窗口，右键出菜单',
+                    style: TextStyle(fontSize: 11),
+                  ),
+                  value: 'minimize',
+                  // ignore: deprecated_member_use
+                  groupValue: state.closeAction,
+                  // ignore: deprecated_member_use
+                  onChanged: (v) {
+                    if (v != null) state.setCloseAction(v);
+                  },
                 ),
-                value: 'minimize',
-                // ignore: deprecated_member_use
-                groupValue: state.closeAction,
-                // ignore: deprecated_member_use
-                onChanged: (v) {
-                  if (v != null) state.setCloseAction(v);
-                },
-              ),
-              RadioListTile<String>(
-                dense: true,
-                secondary: const Icon(Icons.close),
-                title: const Text('退出程序'),
-                subtitle: const Text(
-                  '点 ✕ 走退出流程：先显示「正在保存」，保存完成后退出，'
-                  '与托盘「退出程序」一致',
-                  style: TextStyle(fontSize: 11),
+                RadioListTile<String>(
+                  dense: true,
+                  secondary: const Icon(Icons.close),
+                  title: const Text('退出程序'),
+                  subtitle: const Text(
+                    '点 ✕ 走退出流程：先显示「正在保存」，保存完成后退出，'
+                    '与托盘「退出程序」一致',
+                    style: TextStyle(fontSize: 11),
+                  ),
+                  value: 'quit',
+                  // ignore: deprecated_member_use
+                  groupValue: state.closeAction,
+                  // ignore: deprecated_member_use
+                  onChanged: (v) {
+                    if (v != null) state.setCloseAction(v);
+                  },
                 ),
-                value: 'quit',
-                // ignore: deprecated_member_use
-                groupValue: state.closeAction,
-                // ignore: deprecated_member_use
-                onChanged: (v) {
-                  if (v != null) state.setCloseAction(v);
-                },
-              ),
-              ListTile(
-                dense: true,
-                leading: const Icon(Icons.open_in_new),
-                title: const Text('显示主窗口'),
-                subtitle: const Text(
-                  '窗口已隐藏到通知栏时，从这里恢复',
-                  style: TextStyle(fontSize: 11),
+              ] else
+                // Android：常驻通知是唯一的「后台保活」说明。
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.notifications_active_outlined),
+                  title: const Text('后台运行'),
+                  subtitle: const Text(
+                    '转写期间会显示常驻通知（前台服务），点 ✕ 退出主界面后'
+                    '仍在后台继续转写，可从通知栏的「停止转写」结束',
+                    style: TextStyle(fontSize: 11),
+                  ),
                 ),
-                onTap: () => TrayService.instance.showWindow(),
-              ),
+              // 「显示主窗口」是 Windows 托盘的恢复入口 —— Android 无托盘，
+              // 从桌面图标/最近任务即可回到主界面，故整项仅桌面端显示。
+              if (!Platform.isAndroid)
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.open_in_new),
+                  title: const Text('显示主窗口'),
+                  subtitle: const Text(
+                    '窗口已隐藏到通知栏时，从这里恢复',
+                    style: TextStyle(fontSize: 11),
+                  ),
+                  onTap: () => TrayService.instance.showWindow(),
+                ),
             ]),
             const SizedBox(height: 16),
             _Section(title: '声源（可多选，同时转译）', children: [

@@ -35,6 +35,7 @@ pub fn create_capture(
 ) -> crate::Result<Box<dyn SystemAudioCapture>> {
     // 未启用任何采集 feature 时两个参数都可能不被使用（消警告）
     let _ = (&source, &runtime);
+    crate::alog!("create_capture 进入 source={source:?} runtime={runtime:?}");
     // 桌面端：Windows + macOS 都由 flexaudio 统一处理
     #[cfg(feature = "capture-desktop")]
     {

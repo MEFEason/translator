@@ -1,0 +1,3 @@
+# 构建期由 app/build.gradle.kts 的 syncModels 任务从
+# translator_core/models 自动镜像 —— 不入库（441MB）。
+/models/

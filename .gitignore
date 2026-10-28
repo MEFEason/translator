@@ -83,3 +83,9 @@ version_decision_*.md
 
 # ── 构建戳（版本/时间戳缓存，每次构建都变，不该进版本库）────
 translator_core/core/.rust-build-stamp
+
+# ── 本地开发残留（不入库）────────────────────────────────
+# Flutter widget 预览的临时工程（.dart_tool 缓存等，127MB）
+translator_core/ui/.widget_preview/
+# Dart & Flutter DevTools 本地设置
+translator_core/ui/devtools_options.yaml

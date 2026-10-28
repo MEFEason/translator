@@ -15,6 +15,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 import kotlin.concurrent.thread
 
 /**
@@ -63,7 +64,8 @@ class MainActivity : FlutterActivity() {
     private class PendingStart(
         val useSystemAudio: Boolean,
         val session: Long,
-        val sourceIndex: Int,
+        val sysIndex: Int,
+        val micIndex: Int,
         val reply: MethodChannel.Result,
     )
 
@@ -110,13 +112,107 @@ class MainActivity : FlutterActivity() {
             )
             "externalFilesDir" ->
                 reply.success(getExternalFilesDir(null)?.absolutePath ?: filesDir.absolutePath)
+            // ⚠️ 2026-10-27：模型目录的**首选**落点 = 应用内部私有目录。
+            //
+            // 为什么不能只用 externalFilesDir（/storage/emulated/0/Android/data/<pkg>/files）：
+            //   Android 11+ 分区存储下，`adb push` 推入的文件属主是 **shell**，
+            //   权限位 `drwxrws--- shell ext_data_rw` → 应用（属主是 u0_xxx）
+            //   **既不是 owner 也不在 ext_data_rw 组** → 访问被拒：
+            //     "FileSystemException: Exists failed ... (OS Error: Permission denied, errno = 13)"
+            //   内部私有目录（/data/data/<pkg>/files）权限天然正确，无需 chmod。
+            //
+            // 搬运方式（deploy 脚本里用）：`adb push` 到 /data/local/tmp，
+            // 再 `run-as <pkg> cp -r` 进 files/ —— 属主即变成应用 UID。
+            "internalFilesDir" -> reply.success(filesDir.absolutePath)
+            // ── 模型内置化（2026-10-28 任务 #16/#17）──
+            // ensureModels：后台线程解压 assets → filesDir/models。
+            // ⚠️ 绝不能在 MethodChannel 主线程同步解压（441MB 要 5~15s，
+            //    会卡死 UI 触发 ANR）—— 立即回「已受理」，
+            //    Dart 侧经 modelsStatus 轮询直到 extracting=false。
+            "ensureModels" -> {
+                thread(name = "model-extract") {
+                    val r = ModelExtractor.ensureModels(this)
+                    Log.i(TAG, "模型解压结束：${r ?: "失败（详见 TranslatorModels 日志）"}")
+                }
+                reply.success(true)
+            }
+            "modelsStatus" -> {
+                // ⚠️ ready 判定必须与 ModelExtractor.ensureModels 完全一致：
+                // 标记**存在且内容等于当前 versionName**。
+                // 第一版只查 exists() —— 重装升级后旧标记残留，
+                // Dart 误判就绪、探到解压到一半的目录（2026-10-28 真机日志实锤：
+                // "目录命中"比"解压完成"早 0.7s）。宁可多等一次轮询。
+                val marker = File(filesDir, "models/.extracted")
+                val currentVersion = try {
+                    packageManager.getPackageInfo(packageName, 0).versionName ?: "unknown"
+                } catch (e: Exception) { "unknown" }
+                val ready = marker.exists() &&
+                    runCatching { marker.readText().trim() == currentVersion }.getOrDefault(false)
+                reply.success(
+                    mapOf(
+                        "extracting" to ModelExtractor.isExtracting(),
+                        "ready" to ready,
+                        "dir" to File(filesDir, "models").absolutePath,
+                    )
+                )
+            }
             "deviceProfile" -> reply.success(OrientationPolicy.profileOf(this))
+            // ── 悬浮字幕窗（2026-10-28 任务 #24）──
+            "overlayPermission" -> reply.success(SubtitleOverlayService.hasPermission(this))
+            "requestOverlayPermission" -> {
+                SubtitleOverlayService.requestPermission(this)
+                reply.success(true)
+            }
+            "showSubtitle" -> {
+                if (!SubtitleOverlayService.hasPermission(this)) {
+                    reply.error("NO_OVERLAY_PERMISSION", "未授予悬浮窗权限", null)
+                    return
+                }
+                SubtitleOverlayService.start(this)
+                reply.success(true)
+            }
+            "hideSubtitle" -> {
+                SubtitleOverlayService.stop(this)
+                reply.success(true)
+            }
+            "updateSubtitle" -> {
+                @Suppress("UNCHECKED_CAST")
+                val lines = (call.argument<List<Map<String, Any>>>("lines") ?: emptyList())
+                    .map { (it["s"] as? String ?: "") to (it["t"] as? String ?: "") }
+                val partialSrc = call.argument<String>("partial") ?: ""
+                val partialZh = call.argument<String>("partialZh") ?: ""
+                SubtitleOverlayService.instance
+                    ?.updateSubtitle(lines, partialSrc, partialZh)
+                reply.success(true)
+            }
             "setCaptureGranted" -> {
                 // Kotlin 是授权的实际感知方 → 把结果转给 Rust 会话，
                 // 让 capture_capability 如实上报（禁止静默降级，DESIGN §2.5.2）
                 val session = call.argument<Long>("session") ?: 0L
                 val granted = call.argument<Boolean>("granted") ?: false
                 reply.success(NativeBridge.sessionSetCaptureGranted(session, granted))
+            }
+            // ── 转写导出（2026-10-28 用户需求）──
+            // 打开系统「另存为」对话框（SAF ACTION_CREATE_DOCUMENT）：
+            // 用户自己选目录 + 填文件名 → 写到用户指定位置。
+            //
+            // ⚠️ 不能用 file_picker 的 saveFile（8.x 在 Android 上不支持），
+            //    也不能写应用私有目录（用户在文件管理器里根本看不到）。
+            // SAF 自带授权，**不需要任何存储权限**。
+            //
+            // 异步语义：**reply 挂起**，直到用户在系统对话框里
+            // 选完/取消，才回包（成功 = URI 字符串，取消 = 空串）。
+            // Dart 侧 await 会挂起 —— 这正是期望行为。
+            "exportSaveAs" -> {
+                val content = call.argument<String>("content") ?: ""
+                val fileName = call.argument<String>("fileName") ?: "transcript.txt"
+                if (content.isEmpty()) {
+                    reply.success("")
+                    return
+                }
+                ExportSaveAsActivity.start(this, content, fileName) { uri ->
+                    reply.success(uri ?: "")
+                }
             }
             else -> reply.notImplemented()
         }
@@ -127,7 +223,17 @@ class MainActivity : FlutterActivity() {
     private fun startCapture(call: MethodCall, reply: MethodChannel.Result) {
         val useSystemAudio = call.argument<Boolean>("useSystemAudio") ?: false
         val session = (call.argument<Number>("session"))?.toLong() ?: 0L
-        val sourceIndex = (call.argument<Number>("sourceIndex"))?.toInt() ?: 0
+        // 双路下标（2026-10-28）：-1 = 该路不起。兼容旧参数 sourceIndex：
+        // 若 Dart 只传了 sourceIndex 且没传 sys/mic 下标，按旧语义
+        // （单路，useSystemAudio 决定它是不是内放）映射。
+        val sysIndex = (call.argument<Number>("sysIndex"))?.toInt()
+            ?: if (call.argument<Number>("micIndex") == null &&
+                (call.argument<Number>("sourceIndex")) != null && useSystemAudio
+            ) (call.argument<Number>("sourceIndex"))!!.toInt() else -1
+        val micIndex = (call.argument<Number>("micIndex"))?.toInt()
+            ?: if (call.argument<Number>("sysIndex") == null &&
+                (call.argument<Number>("sourceIndex")) != null && !useSystemAudio
+            ) (call.argument<Number>("sourceIndex"))!!.toInt() else -1
 
         if (session == 0L) {
             reply.error("BAD_SESSION", "会话指针为空：Dart 须先 session_start", null)
@@ -141,35 +247,37 @@ class MainActivity : FlutterActivity() {
         // 里 launchCapture(...) 才回 —— Dart 侧 startCapture 的 await
         // 因此会等到用户完成授权弹窗，这是预期行为。
         if (!hasAudioPermission()) {
-            pending = PendingStart(useSystemAudio, session, sourceIndex, reply)
+            pending = PendingStart(useSystemAudio, session, sysIndex, micIndex, reply)
             requestPermissions(audioPermList(), REQ_PERMS)
             return
         }
 
-        launchCapture(useSystemAudio, session, sourceIndex, reply)
+        launchCapture(useSystemAudio, session, sysIndex, micIndex, reply)
     }
 
     /** 权限齐备后的真正启动分流。 */
     private fun launchCapture(
         useSystemAudio: Boolean,
         session: Long,
-        sourceIndex: Int,
+        sysIndex: Int,
+        micIndex: Int,
         reply: MethodChannel.Result,
     ) {
         if (useSystemAudio && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             // 内放：MediaProjection 授权必须由 Activity 前台弹窗发起。
             // 暂存参数，授权结果在 ProjectionPermissionActivity 处理。
             ProjectionPermissionActivity.pending =
-                PendingProjectionParams(useSystemAudio, session, sourceIndex)
+                PendingProjectionParams(useSystemAudio, session, sysIndex, micIndex)
             try {
                 ProjectionPermissionActivity.request(this)
             } catch (e: Exception) {
                 // 容器等受限环境连 createScreenCaptureIntent 都可能抛
-                // → 降级麦克风，**必须回包**（否则 Dart 的 await 挂死）
-                Log.w(TAG, "投屏授权流无法发起：${e.message}，降级麦克风")
+                // → 只起麦克风路（双路时代内放失败不拖累麦克风），
+                //   **必须回包**（否则 Dart 的 await 挂死）
+                Log.w(TAG, "投屏授权流无法发起：${e.message}，仅起麦克风")
                 AudioCaptureService.degradeReason = "投屏授权不可用：${e.message}"
                 ProjectionPermissionActivity.pending = null
-                AudioCaptureService.start(this, false, session, sourceIndex)
+                AudioCaptureService.start(this, false, session, -1, micIndex)
                 reply.success(0)
                 return
             }
@@ -177,7 +285,8 @@ class MainActivity : FlutterActivity() {
             // captureStatus 轮询 activeMode 决定继续/降级。
             reply.success(0)
         } else {
-            AudioCaptureService.start(this, false, session, sourceIndex)
+            // 不内放（或 API<29）：只起麦克风路。sysIndex 传 -1。
+            AudioCaptureService.start(this, false, session, -1, micIndex)
             reply.success(0)
         }
     }
@@ -199,7 +308,9 @@ class MainActivity : FlutterActivity() {
             p.reply.error("PERMISSION_DENIED", "麦克风权限未授予", null)
             return
         }
-        runOnUiThread { launchCapture(p.useSystemAudio, p.session, p.sourceIndex, p.reply) }
+        runOnUiThread {
+            launchCapture(p.useSystemAudio, p.session, p.sysIndex, p.micIndex, p.reply)
+        }
     }
 
     /** pending 路径下 reply 延后给 —— 用空实现占位，真实回包在续跑处。 */
@@ -241,28 +352,11 @@ class MainActivity : FlutterActivity() {
     }
 
     // ── 投屏授权结果分发 ─────────────────────────────
-
-    /** 由 [ProjectionPermissionActivity] 在结果就绪后回调。 */
-    fun onProjectionResult(
-        resultCode: Int,
-        data: Intent?,
-        useSystemAudio: Boolean,
-        session: Long,
-        sourceIndex: Int,
-    ) {
-        if (resultCode == RESULT_OK && data != null) {
-            AudioCaptureService.startWithProjection(this, session, sourceIndex, resultCode, data)
-        } else {
-            // 用户拒绝投屏 → 按麦克风继续（Rust 侧 capability 如实标降级）
-            Log.w(TAG, "投屏未授权，降级麦克风")
-            AudioCaptureService.start(this, false, session, sourceIndex)
-        }
-    }
-
-    /** 授权流被容器等环境直接掐断时的兜底（不卡死 Dart 的等待）。 */
-    fun onProjectionFlowAbandoned(session: Long, sourceIndex: Int) {
-        AudioCaptureService.start(this, false, session, sourceIndex)
-    }
+    //
+    // 2026-10-28：旧 onProjectionResult / onProjectionFlowAbandoned
+    // 已删除 —— 全仓库无调用点（ProjectionPermissionActivity 直接调
+    // AudioCaptureService，不经 MainActivity），且双路改造后签名
+    // 已变。保留死代码只会误导后续维护。
 
     override fun onDestroy() {
         channel?.setMethodCallHandler(null)

@@ -205,7 +205,9 @@ impl SessionEngine {
     pub fn new(cfg: &PipelineConfig) -> Result<Self> {
         if cfg.backend == super::BackendChoice::Auto {
             // 只校验目录结构（毫秒级），**不加载引擎**
+            crate::alog!("SessionEngine::new：校验目录结构 asr={}", cfg.asr_model_dir.display());
             cfg.validate()?;
+            crate::alog!("SessionEngine::new：目录校验通过");
         }
         Self::assemble(cfg, None)
     }
@@ -224,12 +226,14 @@ impl SessionEngine {
     }
 
     fn assemble(cfg: &PipelineConfig, backends: Option<Backends>) -> Result<Self> {
+        crate::alog!("assemble 开始：加载词库（{} 个文件）", cfg.glossary_paths.len());
         let glossary = GlossaryManager::new();
         if !cfg.glossary_paths.is_empty() {
             glossary
                 .load_files(&cfg.glossary_paths)
                 .map_err(|e| Error::GlossaryLoad(e.to_string()))?;
         }
+        crate::alog!("assemble：词库就绪");
 
         let live = Arc::new(LiveConfig::from_config(
             cfg.asr_threads,

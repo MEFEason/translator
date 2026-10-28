@@ -263,6 +263,15 @@ pub unsafe extern "C" fn translator_session_create(
         Err(_) => return std::ptr::null_mut(),
     };
 
+    // ⚠️ 2026-10-27：真机可观测性（Android 上 eprintln! 不进 logcat）。
+    crate::alog!(
+        "session_create 开始 backend={:?} asr={} mt_optional={} sources={}",
+        cfg.backend,
+        cfg.asr_model_dir.display(),
+        cfg.mt_optional,
+        cfg.sources.len()
+    );
+
     // 声源规格：内放 / 麦克风。
     //
     // ⚠️ 只有当 JSON **没配** sources 时，才用 `source` 参数兜底建单源
@@ -313,6 +322,7 @@ pub unsafe extern "C" fn translator_session_create(
     // 「不可用 + 原因」，而不是 create 直接返回 null。
     {
         for spec in &cfg.sources {
+            crate::alog!("建采集器：{:?}", spec.kind);
             let cap_src = match spec.kind {
                 SourceKind::SystemAudio => crate::config::CaptureSource::SystemAudio,
                 SourceKind::Microphone => crate::config::CaptureSource::Microphone,
@@ -431,12 +441,25 @@ pub unsafe extern "C" fn translator_session_start(handle: *mut c_void) -> i32 {
 
             let mut out: Vec<(Receiver<PcmChunk>, SourceSpec)> = Vec::new();
             let mut all_taken = true;
-            for (i, c) in cap.iter().enumerate() {
+            for c in cap.iter() {
                 match c.take_receiver() {
                     Some(rx) => {
-                        let spec = cfg.sources.get(i).cloned().unwrap_or_else(|| {
-                            SourceSpec::new(SourceKind::SystemAudio)
-                        });
+                        // 按**采集器自身的声源类型**去 cfg.sources 里找对应 spec
+                        // （含用户自定义的说话人标签）。
+                        //
+                        // ⚠️ 不能用位置下标 `cfg.sources.get(i)`：采集器列表
+                        // 只含创建成功的，某路失败就会错位 →
+                        // 麦克风的音频被挂上内放的说话人标签（对方/我 全乱）。
+                        let spec = cfg
+                            .sources
+                            .iter()
+                            .find(|s| {
+                                s.kind == SourceKind::from(c.source())
+                            })
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                SourceSpec::new(SourceKind::from(c.source()))
+                            });
                         out.push((rx, spec));
                     }
                     None => {
@@ -1392,27 +1415,28 @@ pub unsafe extern "C" fn translator_session_capture_index(
         }
         let session = &*(handle as *const FfiSession);
         let want = match kind {
-            0 => SourceKind::SystemAudio,
-            1 => SourceKind::Microphone,
+            0 => crate::config::CaptureSource::SystemAudio,
+            1 => crate::config::CaptureSource::Microphone,
             _ => return -1,
         };
-        // 采集器列表的顺序 = cfg.sources 的顺序（只跳过创建失败的），
-        // 故按同样顺序跳过失败的声源即可得到正确下标。
-        let cfg_sources: Vec<SourceKind> = match session.engine.lock() {
-            Ok(e) => e.config().sources.iter().map(|s| s.kind).collect(),
-            Err(_) => return -1,
-        };
+        // 按**声源类型**查采集器下标，而不是按位置反推。
+        //
+        // ⚠️ 旧实现是「按 cfg.sources 顺序跳过创建失败的」：
+        //   遍历 cfg_sources[i]，同时 cap_idx 递增，遇到 kind 匹配就返回 cap_idx。
+        //   但当某路创建失败时（内放建不起来 → 列表里只剩麦克风在下标 0），
+        //   cfg_sources[0]=内放 会被匹配到 cap[0]=麦克风 → **张冠李戴**：
+        //   麦克风的音频被当成内放推，字幕说话人标签（对方/我）全错。
+        //
+        // 现在每个采集器自带 source 类型（CaptureHandle::source），
+        // 按类型查永远正确，与列表位置无关。
         let cap = match session.capture.lock() {
             Ok(c) => c,
             Err(_) => return -1,
         };
-        let mut cap_idx = 0usize;
-        for sk in cfg_sources {
-            let Some(_h) = cap.get(cap_idx) else { break };
-            if sk == want {
-                return cap_idx as i32;
+        for (i, h) in cap.iter().enumerate() {
+            if h.source() == want {
+                return i as i32;
             }
-            cap_idx += 1;
         }
         -1
     })

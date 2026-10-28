@@ -19,7 +19,10 @@ import android.util.Log
 data class PendingProjectionParams(
     val useSystemAudio: Boolean,
     val session: Long,
-    val sourceIndex: Int,
+    /** 内放路的 Rust 采集器下标（-1 = 不起内放） */
+    val sysIndex: Int,
+    /** 麦克风路的 Rust 采集器下标（-1 = 不起麦克风） */
+    val micIndex: Int,
 )
 
 /**
@@ -31,10 +34,13 @@ data class PendingProjectionParams(
  * 必须由 Activity 发起，且授权结果通过 `onActivityResult` 返回。
  * 系统音频捕获的授权无法静默完成 —— 这是 OS 设计。
  *
- * ## 结果去向（2026-10-26 接线改造）
+ * ## 结果去向（2026-10-27 修正 Android 14 时序）
  *
- * 授权成功 → 直接调 [AudioCaptureService.startWithProjection]
- * （同进程，projection 经静态暂存交给服务的 startForeground 时序）；
+ * 授权成功 → [AudioCaptureService.startWithProjectionResult]：
+ * 只把 resultCode + data 经 Intent 交给服务，由服务在
+ * startForeground(MEDIA_PROJECTION) **之后**创建 projection。
+ * ⚠️ 绝不能在 Activity 里调 getMediaProjection() 再传递对象 ——
+ * Android 14 会当场抛 SecurityException（旧实现即因此闪退）。
  * 用户拒绝 → 降级起麦克风服务。两条路径都必须把服务起起来，
  * 否则 Dart 的 startCapture 会一直等不到 activeMode 变化。
  *
@@ -75,7 +81,7 @@ class ProjectionPermissionActivity : Activity() {
         if (pendingIntent == null) {
             // 发起方没留下参数（异常流）—— 不能把服务卡死，按麦克风起
             p?.let {
-                AudioCaptureService.start(this, false, it.session, it.sourceIndex)
+                AudioCaptureService.start(this, false, it.session, -1, it.micIndex)
             }
             pending = null
             finish()
@@ -91,10 +97,10 @@ class ProjectionPermissionActivity : Activity() {
         try {
             startActivityForResult(pendingIntent, REQUEST_CODE)
         } catch (e: Exception) {
-            // 卓易通容器等受限环境下可能直接抛异常 → 走降级
+            // 卓易通容器等受限环境下可能直接抛异常 → 只起麦克风路
             Log.w(TAG, "投屏授权不可用：${e.message}")
             AudioCaptureService.degradeReason = "投屏授权不可用：${e.message}"
-            AudioCaptureService.start(this, false, p.session, p.sourceIndex)
+            AudioCaptureService.start(this, false, p.session, -1, p.micIndex)
             pending = null
             finish()
         }
@@ -109,13 +115,18 @@ class ProjectionPermissionActivity : Activity() {
         if (requestCode == REQUEST_CODE && p != null) {
             if (resultCode == RESULT_OK && data != null) {
                 AudioCaptureService.degradeReason = ""
-                AudioCaptureService.startWithProjection(
-                    this, p.session, p.sourceIndex, resultCode, data
+                // ⚠️ 只回传 resultCode+data —— Android 14 禁止在 Activity 里
+                // 先 getMediaProjection 再交给服务（当场 SecurityException，
+                // 2026-10-27 实测闪退）。projection 由服务 startForeground
+                // (MEDIA_PROJECTION) 成功后自行创建。双路：内放+麦克风并行。
+                AudioCaptureService.startWithProjectionResult(
+                    this, p.session, p.sysIndex, p.micIndex, resultCode, data
                 )
             } else {
-                AudioCaptureService.degradeReason = "用户未授予投屏权限，已降级为麦克风"
+                AudioCaptureService.degradeReason = "用户未授予投屏权限，仅麦克风转写"
                 Log.w(TAG, AudioCaptureService.degradeReason)
-                AudioCaptureService.start(this, false, p.session, p.sourceIndex)
+                // 拒绝投屏 → 只起麦克风路（内放路 -1 不起）
+                AudioCaptureService.start(this, false, p.session, -1, p.micIndex)
             }
         }
         finish()

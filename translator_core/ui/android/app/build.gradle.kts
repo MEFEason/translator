@@ -14,7 +14,11 @@
 // 3. ABI 只保留 arm64-v8a —— 卓易通是 arm64 容器，
 //    带其它 ABI 会让 core + sherpa-onnx + Bergamot 各复制一份，包体暴涨。
 
+import java.util.Calendar
 import java.util.Properties
+// ⚠️ 脚本里必须**顶部 import**，不能在代码里写 java.util.Calendar 全限定名 ——
+// Gradle Kotlin DSL 的 `java` 前缀被 java 扩展（JavaPluginExtension）遮蔽，
+// 全限定名会报 "Unresolved reference 'util'"（实测踩过，两次构建失败皆因于此）。
 
 plugins {
     id("com.android.application")
@@ -43,8 +47,16 @@ android {
         minSdk = 29
         // 容器审计会比对 targetSdkVersion，34 是兼容性较好的选择
         targetSdk = 34
+
+        // ── 版本号（2026-10-28 用户规定，与 Rust build.rs 同一格式）──
+        //
+        // 格式：{端}-{渠道}-v{语义版本}-{YYYY}.{MMDD}.{HH}.{mm}
+        // 例：android-beta-v0.9.7-2026.1028.09.35
+        // 端标识**全小写**。三段环境变量由 Android/scripts/build_android.sh
+        // 注入；缺失时退回 snapshot-v0.0.0 + 当前时间（与 Rust 侧一致）。
+        // versionName 允许任意字符串（不含空格），故可直接放完整版本串。
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = translatorVersionName()
 
         // 只留 arm64：卓易通容器是 arm64，带其它 ABI 会显著增大包体
         //
@@ -73,7 +85,8 @@ android {
             isDebuggable = true
             signingConfig = signingConfigs.getByName("debug")
             applicationIdSuffix = ".debug"
-            versionNameSuffix = "-debug"
+            // 2026-10-28：不再追加 "-debug" 后缀 —— 渠道段（beta/snapshot）
+            // 已表达发布阶段，再叠 -debug 会让版本串偏离用户规定格式。
         }
         getByName("release") {
             isMinifyEnabled = true
@@ -87,10 +100,22 @@ android {
     }
 
     // 预编译的 Rust .so（由 scripts/build_android.sh 生成到 jniLibs）
+    // + 模型 assets（由下方 syncModels 任务从 translator_core/models 拷入）
     sourceSets {
         getByName("main") {
             jniLibs.srcDir("src/main/jniLibs")
         }
+    }
+
+    // ── 模型不进二次压缩（2026-10-28 模型内置化）──────────
+    //
+    // .onnx / .bin 是已压缩或二进制权重，deflate 既慢又省不了多少，
+    // 还会让首启解压（assets → filesDir）多一层无谓的 inflate。
+    // noCompress 后 assets 以 STORED 存进 APK，读取即拷贝，快得多。
+    androidResources {
+        noCompress += listOf(
+            "onnx", "bin", "spm", "model", "txt", "tsv", "json", "yaml", "yml",
+        )
     }
 
     // 编译 JNI 桥接层（Kotlin external fun → Rust C ABI）
@@ -153,4 +178,99 @@ dependencies {
 
 flutter {
     source = "../.."
+}
+
+// ── 模型同步进 assets（2026-10-28 模型内置化，任务 #15）────
+//
+// ## 为什么走 Gradle 而不是让开发者手动拷
+// 用户明确要求：模型随软件安装，不得要求 adb push。
+// 单一事实来源 = translator_core/models（Windows 端同源），
+// 构建 APK 时自动镜像到 src/main/assets/models/。
+//
+// ## 路径推导
+// rootDir = ui/android → ../../models = translator_core/models
+//
+// ## 增量
+// Copy 任务按内容指纹判定 up-to-date：模型不变则秒过，
+// 变了才重拷（441MB 全量拷贝约 10 秒，可接受）。
+//
+// ## 剔除清单
+// README.md / manifest/ / sources.json 是给桌面安装器看的元数据，
+// 不进 APK（运行时只按目录结构探测模型文件）。
+val modelsSrc = rootDir.resolve("../../models")
+val modelsDst = file("src/main/assets/models")
+
+val syncModels by tasks.registering(Copy::class) {
+    group = "translator"
+    description = "把 translator_core/models 镜像到 assets/models"
+    from(modelsSrc) {
+        exclude("README.md", "manifest/**", "sources.json")
+    }
+    into(modelsDst)
+    // 模型目录整体作为输入：任何文件增删改都触发重拷
+    inputs.dir(modelsSrc)
+    outputs.dir(modelsDst)
+    doFirst {
+        if (!modelsSrc.exists()) {
+            throw GradleException(
+                "找不到模型目录 $modelsSrc —— 模型内置化要求 " +
+                "translator_core/models 存在（含 asr/、offline/）。" +
+                "若确实要出无模型包（仅 mock 链路），用 -x syncModels 跳过本任务。")
+        }
+    }
+}
+
+// 任何构建（assemble/bundle 的公共前置都是 preBuild）先同步模型
+tasks.named("preBuild") {
+    dependsOn(syncModels)
+}
+
+// ── 版本串组装（2026-10-28 用户规定格式）─────────────────
+//
+// 格式：{端}-{渠道}-v{语义版本}-{YYYY}.{MMDD}.{HH}.{mm}
+// 例：android-beta-v0.9.7-2026.1028.09.35
+//
+// 与 Rust core/build.rs 的 emit_version() 完全同构：
+// 同一批环境变量注入，DLL 与 APK 的版本串只差端标识。
+// 缺失时退回与 Rust 侧一致的默认（snapshot + 0.0.0 + 当前时间），
+// 并打 warning —— 版本写错比退回默认更危险。
+fun translatorVersionName(): String {
+    val channels = setOf("snapshot", "alpha", "beta", "pre", "release", "stable", "current")
+    val channel = (System.getenv("TRANSLATOR_CHANNEL") ?: "").lowercase()
+        .let { if (channels.contains(it)) it else "snapshot".also {
+            if (System.getenv("TRANSLATOR_CHANNEL") != null)
+                logger.warn("未知渠道 TRANSLATOR_CHANNEL=${System.getenv("TRANSLATOR_CHANNEL")}，退回 snapshot")
+        } }
+
+    val semverEnv = System.getenv("TRANSLATOR_SEMVER") ?: ""
+    val semverOk = Regex("""^\d+\.\d+\.\d+$""").matches(semverEnv)
+    val semver = if (semverOk) semverEnv else "0.0.0".also {
+        logger.warn("TRANSLATOR_SEMVER='$semverEnv' 不是 X.Y.Z，退回 0.0.0")
+    }
+
+    // 时间：优先 TRANSLATOR_BUILD_TIME（"YYYY-MM-DD HH:MM:SS" 本地时间），
+    // 缺失用当前时间 —— 与 build.rs 的 parse_time/utc_now 兜底逻辑对齐。
+    // ⚠️ 不用 java.time.LocalDateTime —— Gradle Kotlin DSL 脚本类加载器
+    // 在 JDK25 下解析其属性会报 Unresolved reference（实测踩过），
+    // Calendar 是 javax 老 API，兼容性最稳（类名走顶部 import）。
+    val t = parseBuildTime(System.getenv("TRANSLATOR_BUILD_TIME"))
+        ?: Calendar.getInstance().let { c ->
+            intArrayOf(
+                c.get(Calendar.YEAR),
+                c.get(Calendar.MONTH) + 1,
+                c.get(Calendar.DAY_OF_MONTH),
+                c.get(Calendar.HOUR_OF_DAY),
+                c.get(Calendar.MINUTE),
+            )
+        }
+    val time = "%04d.%02d%02d.%02d.%02d".format(t[0], t[1], t[2], t[3], t[4])
+    return "android-$channel-v$semver-$time"
+}
+
+fun parseBuildTime(s: String?): IntArray? {
+    if (s.isNullOrBlank()) return null
+    val m = Regex("""^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})""").find(s.trim()) ?: return null
+    val (y, mo, d, hh, mi) = m.destructured
+    val a = intArrayOf(y.toInt(), mo.toInt(), d.toInt(), hh.toInt(), mi.toInt())
+    return if (a[1] in 1..12 && a[2] in 1..31 && a[3] <= 23 && a[4] <= 59) a else null
 }

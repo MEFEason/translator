@@ -110,15 +110,29 @@ def check_so() -> None:
         ok("SherpaOnnx* 引用存在（真实 ASR 后端）")
 
     # 版本串：门禁注入生效（防 snapshot-v0.0.0）
+    #
+    # 格式：{端标识}-{渠道}-v{X.Y.Z}-{YYYY}.{MMDD}.{HH}.{mm}
+    # 例：android-beta-v0.9.7-2026.1028.09.35
+    # 端标识全小写（windows / android），放在渠道前面。
     with open(core, "rb") as f:
         blob = f.read()
-    m = re.findall(rb"(?:snapshot|beta|release|alpha|pre|stable|current)-v\d+\.\d+\.\d+-build\d{4}\.\d{4}\.\d{2}\.\d{2}", blob)
+    m = re.findall(
+        rb"(?:windows|android)-(?:snapshot|beta|release|alpha|pre|stable|current)"
+        rb"-v\d+\.\d+\.\d+-\d{4}\.\d{4}\.\d{2}\.\d{2}",
+        blob,
+    )
     if not m:
-        fail("产物中找不到规范版本串（{channel}-v{X.Y.Z}-build{time}）—— 构建未注入 TRANSLATOR_SEMVER/CHANNEL")
+        fail(
+            "产物中找不到规范版本串（{端标识}-{channel}-v{X.Y.Z}-{time}）"
+            "—— 构建未注入 TRANSLATOR_PLATFORM/SEMVER/CHANNEL"
+        )
     else:
         first = m[0].decode()
-        if first.startswith("snapshot-v0.0.0"):
-            fail(f"版本串仍是默认值：{first} —— 构建时须设 TRANSLATOR_SEMVER/TRANSLATOR_CHANNEL")
+        if first.startswith("android-snapshot-v0.0.0"):
+            fail(
+                f"版本串仍是默认值：{first} —— "
+                "构建时须设 TRANSLATOR_SEMVER/TRANSLATOR_CHANNEL"
+            )
         else:
             ok(f"版本串就位：{first}")
 

@@ -5,7 +5,6 @@ import 'dart:isolate' show Isolate, ReceivePort, SendPort;
 import 'dart:ui' show PlatformDispatcher;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 

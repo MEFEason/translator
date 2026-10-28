@@ -3,9 +3,11 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:provider/provider.dart';
 
 import '../state/translator_state.dart';
+import '../services/android_channel.dart';
 import '../services/responsive.dart';
 import '../services/tray_service.dart' show startDragFloatingWindow;
 
@@ -161,10 +163,22 @@ class SubtitlePage extends StatelessWidget {
     }
   }
 
-  /// 导出为 `.txt` 对话记录并**真正写入磁盘**。
+  /// 导出为 `.txt` 对话记录。
   ///
-  /// 之前这里只生成字符串就弹个 Toast（"待写入文件"）——
-  /// 半个功能。用户要的导出就是拿到文件。
+  /// ## Android（2026-10-28 用户需求）
+  ///
+  /// 「导出不能是导出到软件目录，要点击之后复制并打开目录选择」——
+  /// 两步：
+  /// 1. **复制**：内容进剪贴板（用户可直接粘到微信/文档/邮件）
+  /// 2. **打开目录选择**：系统「另存为」对话框（SAF ACTION_CREATE_DOCUMENT），
+  ///    用户自己选位置 → 真写到用户指定处
+  ///
+  /// ⚠️ 不能写应用私有目录（用户在文件管理器里根本看不到），
+  ///    也不能用 file_picker 的 saveFile（8.x 在 Android 上不支持）。
+  ///
+  /// ## 桌面
+  ///
+  /// 走 file_picker 的 saveFile 选保存位置。
   Future<void> _export(BuildContext context, TranslatorState state) async {
     final text = await state.exportTxt();
     if (text.isEmpty) {
@@ -175,49 +189,49 @@ class SubtitlePage extends StatelessWidget {
       return;
     }
 
-    // 让用户选保存位置；取消则回退到转写盘目录
     final name =
         'transcript-${DateTime.now().toIso8601String().replaceAll(RegExp(r'[:.]'), '-')}.txt';
 
-    // ⚠️ Android：file_picker 8.x 的 saveFile **在 Android 上不支持**
-    // （会抛 UnimplementedError / 返回 null）—— 走应用私有目录落盘。
-    // Android 上导出到 getExternalFilesDir()，用户可通过文件管理器
-    // 或 adb 取出（外部私有目录在 Android 10+ 需要 MediaStore 才能被
-    // 第三方浏览，这里先保证「文件确实写出来了」）。
-    String? target;
     if (Platform.isAndroid) {
-      final dir = state.transcriptPath;
-      if (dir.isEmpty) {
-        if (!context.mounted) return;
+      // ① 复制到剪贴板（先做，用户随时能用）
+      await Clipboard.setData(ClipboardData(text: text));
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已复制 ${text.length} 字符到剪贴板')),
+      );
+
+      // ② 打开系统目录选择（SAF 另存为）
+      final uri = await AndroidChannel.instance.exportSaveAs(
+        content: text,
+        fileName: name,
+      );
+      if (!context.mounted) return;
+      if (uri.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('未设置转写盘目录，无法导出')),
+          const SnackBar(content: Text('已取消另存为（内容仍在剪贴板中）')),
         );
         return;
       }
-      target = '$dir${Platform.pathSeparator}$name';
-    } else {
-      final picked = await FilePicker.platform.saveFile(
-        dialogTitle: '导出字幕',
-        fileName: name,
-        type: FileType.custom,
-        allowedExtensions: const ['txt'],
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已导出 → $uri')),
       );
-      target = picked;
+      return;
     }
 
+    // 桌面：file_picker 选保存位置
+    final target = await FilePicker.platform.saveFile(
+      dialogTitle: '导出字幕',
+      fileName: name,
+      type: FileType.custom,
+      allowedExtensions: const ['txt'],
+    );
+
     if (target == null) {
-      // 回退：写到转写盘所在目录（用户已见过这个位置）
-      final dir = state.transcriptPath;
-      if (dir.isEmpty) {
-        if (!context.mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('已取消导出')),
-        );
-        return;
-      }
-      // transcriptPath 就是**目录**本身（2026-10-25 语义纠正：
-      // 以前误以为是文件路径而取 parent，回退位置跑到桌面上一级）
-      target = '$dir${Platform.pathSeparator}$name';
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('已取消导出')),
+      );
+      return;
     }
 
     try {

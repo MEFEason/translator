@@ -50,11 +50,18 @@ object NativeBridge {
     private fun ensureLoaded() {
         if (loaded) return
         try {
+            // ⚠️ 两个库都要加载，缺一不可（2026-10-28 闪退教训）：
+            // - translator_core = Rust 核心（Dart FFI 打开的是同一实例）
+            // - native_bridge   = JNI 导出层，`Java_com_translator_app_*`
+            //   符号全在这里。core.so 并**不**依赖 bridge.so（依赖方向
+            //   相反：bridge 链 core），只 loadLibrary("translator_core")
+            //   的话，external fun 一律 UnsatisfiedLinkError。
             System.loadLibrary("translator_core")
+            System.loadLibrary("native_bridge")
             loaded = true
-            Log.i(TAG, "libtranslator_core.so 加载成功")
+            Log.i(TAG, "libtranslator_core.so + libnative_bridge.so 加载成功")
         } catch (e: UnsatisfiedLinkError) {
-            Log.e(TAG, "加载 libtranslator_core.so 失败", e)
+            Log.e(TAG, "加载原生库失败", e)
             throw e
         }
     }
