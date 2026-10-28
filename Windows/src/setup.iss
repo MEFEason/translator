@@ -32,16 +32,18 @@
 
 #define MyAppName "Translator"
 ; ★ 版本号从构建产物读取，不手写 ★
-; 版本号的唯一来源是 Rust 侧 build.rs（TRANSLATOR_CHANNEL + TRANSLATOR_SEMVER +
-; TRANSLATOR_BUILD_TIME），由 package.sh 写进 Windows\.version.ini。
+; 版本号的唯一来源是 Rust 侧 build.rs（TRANSLATOR_PLATFORM + TRANSLATOR_CHANNEL +
+; TRANSLATOR_SEMVER + TRANSLATOR_BUILD_TIME），由 package.sh 写进 Windows\.version.ini。
 ; 安装器用 ISPP 的 ReadIni 读它 → 安装目录名、安装器名、PE 版本信息
 ; 与「关于页」显示的版本号永远一致。
 ; 手写版本号会与 Rust 侧脱节（踩过：改了 Rust 忘了改安装器）。
 ; 版本串形如：
-;   beta-v0.9.1-build2026.1022.15.16      测试版（主版本恒 0，只动后面数字）
-;   release-v1.0.0-build2026.1022.15.16   正式版（大迭代更新全部数字）
-; 读不到时退回 snapshot-v0.0.0-unknown（首次编译、或手工单独跑 ISCC 时）。
-#define MyAppVersion ReadIni("..\.version.ini", "version", "full", "snapshot-v0.0.0-unknown")
+;   windows-release-v1.0.0-2026.1028.09.35   正式版（大迭代更新全部数字）
+;   windows-beta-v0.9.7-2026.1028.09.35      测试版（主版本恒 0，只动后面数字）
+; 读不到时退回 windows-snapshot-v0.0.0-unknown（首次编译、或手工单独跑 ISCC 时）。
+#define MyAppVersion ReadIni("..\.version.ini", "version", "full", "windows-snapshot-v0.0.0-unknown")
+; 端标识（windows / android，全小写），供展示用
+#define MyAppPlatform ReadIni("..\.version.ini", "version", "platform", "windows")
 ; PE 版本资源用的四段纯数字版本（version.ini 的 num 段，缺省同上）。
 ; 形如 `0.9.1.1022` = 主.次.修订.月日 —— 同日重复构建靠完整串区分。
 #define MyAppVersionNumber ReadIni("..\.version.ini", "version", "num", "0.0.0.0")

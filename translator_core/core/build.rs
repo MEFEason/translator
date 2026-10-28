@@ -30,20 +30,32 @@ static PENDING_BUILD_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// 生成版本串。
 ///
-/// 格式：`{channel}-v{semver}-build{YYYY}.{MMDD}.{HH}.{mm}`
-/// 例如 `beta-v0.9.1-build2026.1022.15.16`（测试版）
-///      `release-v1.0.0-build2026.1022.15.16`（正式版）
+/// 格式：`{platform}-{channel}-v{semver}-{YYYY}.{MMDD}.{HH}.{mm}`
+/// 例如 `windows-release-v1.0.0-2026.1028.09.35`（正式版 · Windows 端）
+///      `android-beta-v0.9.7-2026.1028.09.35`（测试版 · Android 端）
 ///
-/// ## 四段各是什么（对应版本号规范 A.B.C.D + 渠道）
+/// ## 端标识大小写（用户规定，2026-10-28）
 ///
-/// 参照通用版本号规范（主版本号.次版本号.修订号，加阶段标识符与构建号）：
+/// 端标识**全小写**（`android` / `windows`），与用户给的样例
+/// `android-test-v0.9.7-2026.1028.09.35` 对齐（样例里的 test 是占位，
+/// 实际渠道取白名单值，如 beta）。
 ///
+/// ## 五段各是什么（对应版本号规范 A.B.C.D + 阶段标识符 + 构建号）
+///
+/// - `platform` —— **端标识**（windows / android），标识这个包属于哪一端。
+///   由 `TRANSLATOR_PLATFORM` 注入；同一仓库要出两端的包，靠它区分。
 /// - `channel` —— 渠道（snapshot/alpha/beta/pre/release/stable/current），
 ///   标识这个构建处于什么阶段。
 /// - `v{semver}` —— 语义版本 `v{主}.{次}.{修订}`（如 `v0.9.1`），
 ///   由 `TRANSLATOR_SEMVER` 注入。
-/// - `build{time}` —— 构建号 `build{YYYY}.{MMDD}.{HH}.{mm}`（如
-///   `build2026.1022.15.16`），标识这是第几次构建。
+/// - `{YYYY}.{MMDD}.{HH}.{mm}` —— 构建时间戳（本地时间），
+///   标识这是第几次构建。
+///
+/// ## 端标识位置（用户规定，2026-10-28）
+///
+/// 端标识放在**渠道前面**：`windows-release-…` / `android-release-…`。
+/// 之前版本号不带端标识，Windows 包与 Android 包版本串完全一样，
+/// 混在同一批产物里时无法分辨来源。
 ///
 /// ## 语义版本的递进规则（用户规定）
 ///
@@ -73,9 +85,39 @@ static PENDING_BUILD_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// 故由构建脚本注入 `TRANSLATOR_BUILD_TIME`（`2026-10-22 15:16:30`，
 /// 本地时间），本函数只做格式化。缺失时退回 UTC。
 fn emit_version() {
+    println!("cargo:rerun-if-env-changed=TRANSLATOR_PLATFORM");
     println!("cargo:rerun-if-env-changed=TRANSLATOR_CHANNEL");
     println!("cargo:rerun-if-env-changed=TRANSLATOR_SEMVER");
     println!("cargo:rerun-if-env-changed=TRANSLATOR_BUILD_TIME");
+
+    // 端标识：只有 windows / android 两个合法值（**全小写**，
+    // 用户 2026-10-28 规定；Windows 端会话同步时注意此变更）。
+    // 优先级：
+    //   1. TRANSLATOR_PLATFORM 显式注入（构建脚本指定，大小写不敏感）；
+    //   2. 按编译目标自动推断（CARGO_CFG_TARGET_OS）——
+    //      cargo 交叉编译 Android 时该变量是 "android"，Windows 是 "windows"；
+    //   3. 都没有 → 退回 windows（当前唯一有安装器的一端）。
+    //
+    // 自动推断这一层很重要：Android 端构建脚本若忘了注入平台标识，
+    // 版本串会静默变成 `windows-…`，把 Android 包说成 Windows 包。
+    const PLATFORMS: [&str; 2] = ["windows", "android"];
+    let platform_env = std::env::var("TRANSLATOR_PLATFORM")
+        .ok()
+        .map(|s| s.to_lowercase());
+    let platform = match platform_env.as_deref() {
+        Some(p) if PLATFORMS.contains(&p) => p,
+        Some(other) => {
+            println!(
+                "cargo:warning=未知端标识 TRANSLATOR_PLATFORM={other}，退回 windows"
+            );
+            "windows"
+        }
+        None => match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
+            Ok("android") => "android",
+            Ok("windows") => "windows",
+            _ => "windows",
+        },
+    };
 
     // 渠道：白名单内才采纳，非法值退回 snapshot（当前是开发版）
     const CHANNELS: [&str; 7] = [
@@ -121,15 +163,18 @@ fn emit_version() {
     // 版本号用 **4 位年**（用户要求）：`2026.1022.15.16`
     // 2 位年有歧义（26 → 2026 还是 1926），且跨世纪后无法区分。
     let time = format!("{yyyy}.{mm:02}{dd:02}.{hh:02}.{mi:02}");
-    let build = format!("build{time}");
-    let full = format!("{channel}-v{semver}-{build}");
+    // 版本串：{端标识}-{渠道}-v{语义版本}-{时间戳}
+    // 例：windows-release-v1.0.0-2026.1028.09.35
+    let full = format!("{platform}-{channel}-v{semver}-{time}");
 
     println!("cargo:rustc-env=TRANSLATOR_BUILD_VERSION={full}");
     // 仅语义版本（不带渠道与构建号），供 UI / 脚本单独取用
     println!("cargo:rustc-env=TRANSLATOR_BUILD_SEMVER=v{semver}");
     println!("cargo:rustc-env=TRANSLATOR_BUILD_VERSION_SHORT=v{semver}");
-    // 构建号单独导出（build2026.1022.15.16）
-    println!("cargo:rustc-env=TRANSLATOR_BUILD_BUILD={build}");
+    // 端标识单独导出（windows / android）
+    println!("cargo:rustc-env=TRANSLATOR_BUILD_PLATFORM={platform}");
+    // 构建号单独导出（时间戳 2026.1022.15.16）
+    println!("cargo:rustc-env=TRANSLATOR_BUILD_BUILD={time}");
     println!("cargo:rustc-env=TRANSLATOR_BUILD_TIME_COMPACT={time}");
     println!("cargo:rustc-env=TRANSLATOR_BUILD_STAMP={yyyy}.{mm:02}.{dd:02} {hh:02}:{mi:02}");
     println!("cargo:rustc-env=TRANSLATOR_BUILD_CHANNEL={channel}");

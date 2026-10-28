@@ -1,4 +1,3 @@
-import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -71,10 +70,36 @@ class ChannelInfo {
     ),
   };
 
-  /// 从版本串解析渠道：`beta-v0.9.1-build2026.1022.15.16` → `beta`
+  /// 从版本串解析渠道。
+  ///
+  /// 版本串格式：`{端标识}-{渠道}-v{语义版本}-{时间戳}`
+  /// 例：`windows-release-v1.0.0-2026.1028.09.35` → 渠道 `release`
+  ///
+  /// ⚠️ 渠道在**第二段**（第一段是端标识 Windows / Android）。
+  /// 旧格式 `beta-v0.9.1-…` 的渠道在第一段，正则若写成 `^([a-z]+)-`
+  /// 会把新格式的 `windows` 当成渠道（端标识与渠道同为小写字母，
+  /// 正则会匹配成功 → 渠道显示成 `windows`）。
+  /// 故这里显式列出已知渠道名做精确匹配，不靠位置猜。
+  static const _channels = [
+    'snapshot',
+    'alpha',
+    'beta',
+    'pre',
+    'release',
+    'stable',
+    'current',
+  ];
+
   static String channelOf(String version) {
-    final m = RegExp(r'^([a-z]+)-').firstMatch(version);
-    return m?.group(1) ?? '';
+    final parts = version.split('-');
+    // 新格式：[端标识, 渠道, vX.Y.Z, 时间戳] → 取第 2 段
+    // 旧格式：[渠道, vX.Y.Z, build时间] → 取第 1 段（向后兼容）
+    for (final i in [1, 0]) {
+      if (i < parts.length && _channels.contains(parts[i])) {
+        return parts[i];
+      }
+    }
+    return '';
   }
 }
 
@@ -82,8 +107,8 @@ class ChannelInfo {
 ///
 /// 展示**构建时生成**的版本号 —— 用户报障时能凭它定位到具体构建。
 /// 版本串由 Rust 侧 `translator_version()` 提供，形如：
-/// `beta-v0.9.1-build2026.1022.15.16`
-/// 四段分别是：渠道 + 语义版本（v主.次.修订）+ 构建号（build+时间）。
+/// `windows-release-v1.0.0-2026.1028.09.35`
+/// 五段分别是：端标识 + 渠道 + 语义版本（v主.次.修订）+ 构建时间戳。
 class AboutPage extends StatelessWidget {
   const AboutPage({super.key});
 

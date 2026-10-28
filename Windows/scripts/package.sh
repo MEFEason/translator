@@ -70,7 +70,9 @@ read_version_from_dll() {
   "$PYTHON_BIN" -c "
 import re,sys
 d=open(sys.argv[1],'rb').read()
-m=re.search(rb'([a-z]+-v\d+\.\d+\.\d+-build\d{4}\.\d{4}\.\d{2}\.\d{2})',d)
+# 版本串格式：{端标识}-{渠道}-v{语义版本}-{时间戳}
+# 例：Windows-release-v1.0.0-2026.1028.09.35
+m=re.search(rb'((?:windows|android)-(?:snapshot|alpha|beta|pre|release|stable|current)-v\d+\.\d+\.\d+-\d{4}\.\d{4}\.\d{2}\.\d{2})',d)
 print(m.group(1).decode() if m else '')
 " "$CORE/target/release/translator_core.dll"
 }
@@ -79,7 +81,7 @@ rust_needs_rebuild() {
   [ "${SKIP_BUILD:-0}" = "1" ] && return 1   # SKIP_BUILD 由外层处理
   [ -f "$CORE/target/release/translator_core.dll" ] || return 0
   [ -f "$RUST_STAMP" ] || return 0
-  [ "$(cat "$RUST_STAMP" 2>/dev/null)" = "$TRANSLATOR_SEMVER|$TRANSLATOR_CHANNEL" ] || return 0
+  [ "$(cat "$RUST_STAMP" 2>/dev/null)" = "$TRANSLATOR_PLATFORM|$TRANSLATOR_SEMVER|$TRANSLATOR_CHANNEL" ] || return 0
   local newest
   newest=$(find "$CORE/src" "$CORE/csrc" "$CORE/build.rs" -type f -newer \
            "$CORE/target/release/translator_core.dll" 2>/dev/null | head -1)
@@ -88,26 +90,28 @@ rust_needs_rebuild() {
   # ⚠️ **DLL 内嵌版本必须与本次请求一致**，否则必须重编。
   #
   # 踩过的坑：手工跑 `cargo build --release`（不带 TRANSLATOR_SEMVER /
-  # TRANSLATOR_CHANNEL）会把 DLL 里的版本串写成 `snapshot-v0.0.0-build…`，
+  # TRANSLATOR_CHANNEL）会把 DLL 里的版本串写成 `snapshot-v0.0.0-…`，
   # 而版本戳文件仍是旧的 → 源码时间戳也没变 → 脚本误判「可跳过编译」，
   # 于是把版本号错误的 DLL 装进了安装包。
   #
   # 所以这里**以 DLL 里反读到的真实版本串为准**，而不是信任戳文件。
+  # 版本串格式：{端标识}-{渠道}-v{语义版本}-{时间戳}
   local dll_ver
   dll_ver="$(read_version_from_dll)"
   case "$dll_ver" in
-    "$TRANSLATOR_CHANNEL-v$TRANSLATOR_SEMVER-build"*) return 1 ;;  # 一致 → 可跳过
+    "$TRANSLATOR_PLATFORM-$TRANSLATOR_CHANNEL-v$TRANSLATOR_SEMVER-"*) return 1 ;;  # 一致 → 可跳过
     *) return 0 ;;   # 不一致或读不到 → 必须重编
   esac
 }
 
 
 # ── 版本号注入 ──
-# 版本串形如 `beta-v0.9.1-build2026.1022.15.16`（测试版）
-#              `release-v1.0.0-build2026.1022.15.16`（正式版）
-#   channel —— 版本渠道（snapshot/alpha/beta/pre/release/stable/current）
-#   semver  —— 语义版本 v{主}.{次}.{修订}（TRANSLATOR_SEMVER 注入）
-#   build   —— 构建号 build + YYYY.MMDD.HH.mm
+# 版本串形如 `windows-release-v1.0.0-2026.1028.09.35`（正式版）
+#              `windows-beta-v0.9.7-2026.1028.09.35`（测试版）
+#   platform —— 端标识（windows / android，**全小写**），标识这个包属于哪一端
+#   channel  —— 版本渠道（snapshot/alpha/beta/pre/release/stable/current）
+#   semver   —— 语义版本 v{主}.{次}.{修订}（TRANSLATOR_SEMVER 注入）
+#   time     —— 构建时间戳 YYYY.MMDD.HH.mm
 #
 # 语义版本递进规则（用户规定）：
 #   - 正式版大迭代 → 更新全部数字：v1.0.0、v2.0.0
@@ -119,7 +123,7 @@ rust_needs_rebuild() {
 # 拿不到本地时间。
 #
 # 常用组合：
-#   TRANSLATOR_SEMVER=0.9.1 TRANSLATOR_CHANNEL=beta   bash scripts/package.sh   # 测试版
+#   TRANSLATOR_SEMVER=0.9.7 TRANSLATOR_CHANNEL=beta   bash scripts/package.sh   # 测试版
 #   TRANSLATOR_SEMVER=1.0.0 TRANSLATOR_CHANNEL=release bash scripts/package.sh # 正式版
 #
 # ⚠️ 时间**只取一次**，脚本全程复用：
@@ -129,10 +133,13 @@ rust_needs_rebuild() {
 export TRANSLATOR_BUILD_TIME="$(date '+%Y-%m-%d %H:%M:%S')"
 export TRANSLATOR_CHANNEL="${TRANSLATOR_CHANNEL:-snapshot}"
 export TRANSLATOR_SEMVER="${TRANSLATOR_SEMVER:-0.0.0}"
+# 端标识：**全小写**（用户 2026-10-28 规定）。Windows 端固定为 windows。
+# （Android 端由 build_android.sh 注入 android）
+export TRANSLATOR_PLATFORM="${TRANSLATOR_PLATFORM:-windows}"
 # 与 TRANSLATOR_BUILD_TIME 同源，拆成数字便于拼版本串
 read -r V_YYYY V_MM V_DD V_HH V_MI _ <<< "$(date '+%Y %m %d %H %M %S')"
 V_TIME="$V_YYYY.$V_MM$V_DD.$V_HH.$V_MI"
-VERSION_FULL="$TRANSLATOR_CHANNEL-v$TRANSLATOR_SEMVER-build$V_TIME"
+VERSION_FULL="$TRANSLATOR_PLATFORM-$TRANSLATOR_CHANNEL-v$TRANSLATOR_SEMVER-$V_TIME"
 # PE 版本资源必须**四段纯数字**（不能带横杠、不能带字母）。
 # 语义版本前三段 + 月日时分压一段：v0.9.1 + 20261022.1516 不可行（超 16 位），
 # 故用「主.次.修订.月日时分」= 0.9.1.10221516 仍超限
@@ -190,7 +197,7 @@ elif rust_needs_rebuild; then
     || die "Rust 构建失败"
   cp -f "$CORE/target/release/translator_core.dll" "$UI/windows/rust/translator_core.dll" \
     || die "DLL 拷贝失败"
-  printf '%s' "$TRANSLATOR_SEMVER|$TRANSLATOR_CHANNEL" > "$RUST_STAMP"
+  printf '%s' "$TRANSLATOR_PLATFORM|$TRANSLATOR_SEMVER|$TRANSLATOR_CHANNEL" > "$RUST_STAMP"
 else
   log "  Rust 源码未变、版本一致 → 跳过编译（CARGO_INCREMENTAL 已启用）"
   DLL_VER="$(read_version_from_dll)"
@@ -198,6 +205,20 @@ else
     # 用 DLL 里的真实版本串，保证三处一致
     log "  复用 DLL 内嵌版本: $DLL_VER"
     VERSION_FULL="$DLL_VER"
+    # ⚠️ platform / semver 必须**跟着 DLL 里的版本串走**。
+    # 否则会出现 version.ini 自相矛盾：full 里是旧端标识+旧版本，
+    # 而 platform/semver 字段却是本次请求的值 → 安装目录名与
+    # 关于页显示对不上。格式：{platform}-{channel}-v{semver}-{time}
+    # 拆法：按 '-' 切分后 platform=第1段、semver=第3段去 v 前缀。
+    DLL_PLATFORM="${DLL_VER%%-*}"
+    _DLL_REST="${DLL_VER#*-}"
+    _DLL_SEMVER="${_DLL_REST#*-v}"
+    DLL_SEMVER="${_DLL_SEMVER%%-*}"
+    if [ -n "$DLL_PLATFORM" ] && [ -n "$DLL_SEMVER" ]; then
+      TRANSLATOR_PLATFORM="$DLL_PLATFORM"
+      TRANSLATOR_SEMVER="$DLL_SEMVER"
+      export TRANSLATOR_PLATFORM TRANSLATOR_SEMVER
+    fi
     VERSION_NUM="$TRANSLATOR_SEMVER.$V_MM$V_DD"
   fi
   cp -f "$CORE/target/release/translator_core.dll" "$UI/windows/rust/translator_core.dll" \
@@ -265,8 +286,9 @@ done
 # 「安装器名是新版本、装出来的目录名是旧版本」这种极难察觉的错。
 # （staging/version.ini 仍在组装阶段写，随产物发布。）
 for vf in "$WIN_DIR/.version.ini"; do
-  printf '[version]\nfull=%s\nchannel=%s\nsemver=%s\nnum=%s\n' \
-    "$VERSION_FULL" "$TRANSLATOR_CHANNEL" "$TRANSLATOR_SEMVER" "$VERSION_NUM" > "$vf" \
+  printf '[version]\nfull=%s\nplatform=%s\nchannel=%s\nsemver=%s\nnum=%s\n' \
+    "$VERSION_FULL" "$TRANSLATOR_PLATFORM" "$TRANSLATOR_CHANNEL" \
+    "$TRANSLATOR_SEMVER" "$VERSION_NUM" > "$vf" \
     || die "写版本文件失败: $vf"
 done
 log "  版本号: $VERSION_FULL  (PE 资源用 $VERSION_NUM)"
@@ -421,8 +443,9 @@ PYEOF
 #
 # 复用脚本开头算好的 VERSION_FULL / VERSION_NUM（不重新取 date）。
 # $WIN_DIR/.version.ini 已在「编译安装器之前」写好，这里只写随产物发布的那份。
-printf '[version]\nfull=%s\nchannel=%s\nsemver=%s\nnum=%s\n' \
-  "$VERSION_FULL" "$TRANSLATOR_CHANNEL" "$TRANSLATOR_SEMVER" "$VERSION_NUM" \
+printf '[version]\nfull=%s\nplatform=%s\nchannel=%s\nsemver=%s\nnum=%s\n' \
+  "$VERSION_FULL" "$TRANSLATOR_PLATFORM" "$TRANSLATOR_CHANNEL" \
+  "$TRANSLATOR_SEMVER" "$VERSION_NUM" \
   > "$STAGING/version.ini" || die "写版本文件失败: $STAGING/version.ini"
 
 # ⚠️ SHA256SUMS.txt 不在这里算 —— 签名（3.5 节）会改写 exe/dll 的字节，

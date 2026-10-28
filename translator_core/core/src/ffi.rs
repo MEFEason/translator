@@ -136,8 +136,11 @@ impl CaptureHandle {
     fn new(source: CaptureSource, runtime: AndroidRuntime) -> Result<Self> {
         // 容量：4 秒缓冲（与 pipeline 侧的 AudioChannel 对齐）。
         // 满了就丢最旧的，采集线程绝不阻塞。
+        crate::alog!("CaptureHandle::new：建通道");
         let (tx, rx) = sync_channel(CHANNEL_CAPACITY);
+        crate::alog!("CaptureHandle::new：建采集器");
         let inner = crate::platform::create_capture(source, runtime)?;
+        crate::alog!("CaptureHandle::new：完成");
         Ok(Self {
             inner: Mutex::new(inner),
             chunk_tx: tx,
@@ -627,9 +630,10 @@ pub extern "C" fn translator_resource_tiers() -> *mut c_char {
 pub extern "C" fn translator_version() -> *mut c_char {
     ffi_guard_ptr!({{
         // 构建时注入的版本串，形如
-        //   beta-v0.9.1-build2026.1022.15.16      测试版
-        //   release-v1.0.0-build2026.1022.15.16   正式版
-        // 渠道见 build.rs 的 TRANSLATOR_CHANNEL，语义版本见 TRANSLATOR_SEMVER。
+        //   windows-release-v1.0.0-2026.1028.09.35   正式版
+        //   windows-beta-v0.9.7-2026.1028.09.35      测试版
+        // 端标识见 build.rs 的 TRANSLATOR_PLATFORM，渠道见 TRANSLATOR_CHANNEL，
+        // 语义版本见 TRANSLATOR_SEMVER。
         let v = env!("TRANSLATOR_BUILD_VERSION");
         CString::new(v)
             .map(|c| c.into_raw())
