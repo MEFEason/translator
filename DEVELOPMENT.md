@@ -111,17 +111,25 @@ Rust 源码未变且版本戳未变时**跳过 cargo build**（全量 5-10 分�
 
 ## 四、版本号规范
 
-格式：`{channel}-v{主}.{次}.{修订}-build{YYYY}.{MMDD}.{HH}.{mm}`
+格式：`{端标识}-{channel}-v{主}.{次}.{修订}-{YYYY}.{MMDD}.{HH}.{mm}`
 
 ```
-beta-v0.9.27-build2026.1024.15.30
-release-v1.0.0-build2026.1025.09.15
+windows-release-v1.0.0-2026.1028.09.35
+windows-beta-v0.9.7-2026.1028.09.35
+android-beta-v0.9.7-2026.1028.09.35
 ```
 
+- **端标识放在渠道前面**（2026-10-28 变更）：之前两端版本串完全一样，
+  混在同一批产物里无法分辨来源
+- **端标识全小写**：`windows` / `android`
+  - 由 `TRANSLATOR_PLATFORM` 注入（大小写不敏感）
+  - 未注入时按 `CARGO_CFG_TARGET_OS` 推断（交叉编译 Android 自动得到 `android`）
+  - 都没有 → 退回 `windows`
 - **单一来源**：Rust `build.rs` 生成 → `package.sh` 写 `Translator/.version.ini`
-  （`full` / `channel` / `semver` / `num` 四段）→ `setup.iss` 用 ISPP `ReadIni` 读取
-- **PE 版本资源**用 `num` 段 = 四段纯数字 `0.9.27.1024`
-  （带 `build` 或横杠的串进不了 PE 资源；同日重复构建靠完整串区分）
+  （`full` / `platform` / `channel` / `semver` / `num` 五段）→ `setup.iss`
+  用 ISPP `ReadIni` 读取
+- **PE 版本资源**用 `num` 段 = 四段纯数字 `0.9.7.1028`
+  （带横杠或字母的串进不了 PE 资源；同日重复构建靠完整串区分）
 - **递进规则**：
   - 正式版大迭代 → 更新全部数字：`v1.0.0` → `v2.0.0`
   - 测试版 → 只改后面数字，前面恒为 0：`0.9.1` → `0.9.8` → `0.9.12` → `0.9.45` → `0.10.56`
@@ -130,6 +138,9 @@ release-v1.0.0-build2026.1025.09.15
   `release` / `stable` / `current`
 - **4 位年**；**不加时间戳括号**；**关于页只显示版本号本身**
 - ⚠️ **时间只取一次**（脚本开头）—— Rust 编译耗时会让分组阶段重取 `date` 导致版本对不上
+- ⚠️ **渠道解析不能用正则按位置猜**（`about_page.dart` 的 `channelOf`）：
+  端标识与渠道同为小写字母，`^([a-z]+)-` 会把 `windows` 当成渠道。
+  改为**渠道白名单精确匹配**（新格式取第 2 段，旧格式取第 1 段，向后兼容）
 
 ---
 
