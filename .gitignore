@@ -80,3 +80,6 @@ translator_core/ui/*.zip
 # ── 内部文档（本机运维记录，不公开）─────────────────────────
 docs-internal/
 version_decision_*.md
+
+# ── 构建戳（版本/时间戳缓存，每次构建都变，不该进版本库）────
+translator_core/core/.rust-build-stamp
