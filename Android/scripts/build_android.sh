@@ -293,6 +293,8 @@ if [[ "$MOCK_ONLY" != "1" ]]; then
 fi
 
 SIZE="$(du -h "$JNI_LIBS/arm64-v8a/libtranslator_core.so" | cut -f1)"
+# 供门禁 3 的体积粗筛用（整数 MB）
+SIZE_MB=$(( $(wc -c < "$JNI_LIBS/arm64-v8a/libtranslator_core.so") / 1048576 ))
 echo "[PASS] 已生成 $JNI_LIBS/arm64-v8a/libtranslator_core.so ($SIZE)"
 
 # ── 校验（ABI + 链接完整性）────────────────────────────
@@ -316,9 +318,32 @@ if [[ "$MOCK_ONLY" != "1" ]]; then
     echo "[FAIL] 产物里没有 SherpaOnnx* 符号 —— 疑似 mock 壳" >&2
     exit 1
   fi
-  # 门禁 3：禁止静态 bionic（crt-static 残留检查 —— 阶段 0 的验收项）
-  if ! echo "$NEEDED" | grep -q "libc.so"; then
-    echo "[FAIL] 产物不依赖动态 libc.so —— 疑似仍带 crt-static，请查 .cargo/config.toml" >&2
+  # 门禁 3：禁止混入 **Windows CRT**（这才是「crt-static 残留」的本意）。
+  #
+  # ⚠️ 2026-10-28 修正判据：原判据是「NEEDED 里必须有 libc.so」，
+  #   那是从 **Windows 的 crt-static 概念**套过来的，在 Android 上**是错的**：
+  #
+  #   NDK r24+ 的 sysroot 里**只有 libc.a，没有 libc.so**
+  #   （实测：`sysroot/usr/lib/aarch64-linux-android/` 下只有 libc.a / libdl.a）。
+  #   NDK 官方模型自 r23 起就是「应用静态链接 bionic 的必要部分」
+  #   （链接器按需从归档里提取 obj）→ Android 的 .so **本来就不该**
+  #   依赖 libc.so。旧判据只在「没链任何 C++ 静态库」时侥幸成立
+  #   （那时 -lc 解析到的还是 r27c 时代的 stub）。
+  #
+  #   一旦链了 Bergamot 全树（需要 libc++_static + libc++abi），
+  #   bionic 的相关 obj 就被静态并入 → 旧判据必然误报。
+  #
+  #   正确判据：NEEDED 里**不能**出现 Windows 的 CRT
+  #   （msvcrt / vcruntime / ucrt）—— 那才是真·crt-static 残留。
+  if echo "$NEEDED" | grep -qiE "msvcrt|vcruntime|ucrt"; then
+    echo "[FAIL] 产物依赖了 Windows CRT —— crt-static 配置泄漏到了 Android 目标" >&2
+    exit 1
+  fi
+  # 附带检查：静态 bionic 不应把整个 libc 都塞进来。
+  # 判据用体积粗筛：全量 libc.a 约 3~4MB，纯 Rust 的 .so 约 2.8MB。
+  # 超过 25MB 说明把不该静态链的东西链进来了。
+  if [[ "$SIZE_MB" -gt 25 ]]; then
+    echo "[FAIL] 产物 ${SIZE_MB}MB 偏大 —— 疑似静态链入了整个 bionic，请检查链接输入" >&2
     exit 1
   fi
   echo "[PASS] 链接校验通过（sherpa 已链入、动态 bionic、含 ASR 符号）"

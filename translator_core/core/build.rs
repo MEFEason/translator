@@ -592,47 +592,117 @@ fn link_android() {
     // 而 Bergamot 的 obj 引用 C++ 标准库符号。
     if target_os == "android" {
         if let Some(ndk) = android_ndk_root() {
+            // ⚠️⚠️ **必须**把 API 级目录 `…/usr/lib/aarch64-linux-android/<api>`
+            //    加进链接搜索路径！
+            //
+            // 为什么：NDK 的 sysroot 里有**两份** bionic：
+            //   usr/lib/aarch64-linux-android/libc.a     ← 静态归档
+            //   usr/lib/aarch64-linux-android/29/libc.so  ← **动态 stub**（真 ELF）
+            //
+            // Rust 链接 Android 时用 `-lc`，但它**不会**像 clang driver 那样
+            // 自动加 API 级目录 → `-lc` 只找到 `libc.a` → **静态链入 bionic**。
+            //
+            // 后果（2026-10-28 真机实测，启动即闪退）：
+            //   bionic 的静态构造器 `init_have_lse_atomics`
+            //   （在 libc.a 的 aarch64.c 里）会在 dlopen 阶段执行，
+            //   而它依赖的 bionic 全局状态是由**系统动态 libc.so** 初始化的
+            //   —— 我们静态复制了代码、却没有那份状态 →
+            //   `__bionic_getauxval()` 解引用空指针 → SIGSEGV。
+            //
+            // 崩溃栈（符号化后）：
+            //   #00 __bionic_getauxval(unsigned long, bool*)
+            //   #01 getauxval
+            //   #02 init_have_lse_atomics
+            //   #03 soinfo::call_constructors   ← dlopen 时的静态初始化
+            //   #04 do_dlopen
+            //
+            // 加上这个目录后，`-lc` 优先命中**动态 stub** →
+            // bionic 保持动态、初始化交给系统 → 不崩。
+            let api = std::env::var("ANDROID_API_LEVEL").unwrap_or_else(|_| "29".to_string());
             let lib_dir = ndk.join(
                 "toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android",
             );
-            if lib_dir.is_dir() {
-                println!("cargo:rustc-link-search=native={}", lib_dir.display());
-                // NDK 的 C++ 运行时拆成两个归档（LLVM 17+）：
-                //   libc++_static.a —— C++ 标准库本体（容器、算法、iostream…）
-                //   libc++abi.a    —— ABI 层（__cxa_throw / __cxa_allocate_exception /
-                //                      typeinfo / vtable / unwinder 胶水）
-                // 只链前者会缺一大批 undefined symbol（std::terminate、
-                // __cxa_throw、typeinfo for std::bad_alloc…）→ 两个都要链。
-                //
-                // ⚠️ 顺序：libc++_static 在前、libc++abi 在后 ——
-                //    静态链接对顺序敏感（引用者在前、被引用者在后）。
-                println!("cargo:rustc-link-lib=static=c++_static");
-                println!("cargo:rustc-link-lib=static=c++abi");
+            let api_dir = lib_dir.join(&api);
 
-                // ★ compiler-rt builtins：ARM 栈保护的配套符号。
+            // ⚠️⚠️ **顺序至关重要**：API 级目录（含动态 libc.so stub）
+            //    必须排在 **前面**！
+            //
+            // 链接器按 `-L` 的先后找库：若 `…/aarch64-linux-android`（含 libc.a）
+            // 在前，`-lc` 就先命中**静态** libc.a → 又变回静态 bionic → 启动闪退。
+            // 把含 libc.so 的 API 级目录放前面，`-lc` 才会命中动态 stub。
+            if api_dir.is_dir() {
+                println!("cargo:rustc-link-search=native={}", api_dir.display());
+            } else {
+                println!(
+                    "cargo:warning=NDK API 级目录不存在：{}",
+                    api_dir.display()
+                );
+            }
+            println!("cargo:rustc-link-search=native={}", lib_dir.display());
+            if api_dir.is_dir() {
+
+                // ★ Android 的 CRT（.so 专用）：crtbegin_so.o / crtend_so.o。
                 //
-                // 现象：链接期报 "undefined symbol: __arm_za_disable"。
-                // 原因：NDK r30 的 clang 默认启用 ARM 的
-                // `-mstack-protector-guard=tz`（zone-based 栈保护），
-                // 被保护的函数会引用 `__arm_za_disable` /
-                // `__stack_chk_fail` 这类 helper。
-                // 这些 helper 定义在 **compiler-rt** 里
-                // （`libclang_rt.builtins-aarch64-android.a`），
-                // 而 Rust 的链接命令行不会自动加它。
+                // NDK 官方链接姿势（实测 clang -v）：
+                //   crtbegin_so.o …obj… libclang_rt.builtins.a -l:libunwind.a
+                //   -ldl -lc … crtend_so.o
                 //
-                // 路径：<ndk>/toolchains/llvm/prebuilt/<host>/lib/clang/<ver>/lib/linux/
-                // 版本号会随 NDK 变 → 用通配扫一遍取第一个匹配。
-                if let Some(rt) = find_compiler_rt(&ndk) {
-                    println!("cargo:rustc-link-search=native={}", rt.parent().unwrap().display());
-                    println!("cargo:rustc-link-lib=static=clang_rt.builtins-aarch64-android");
-                } else {
-                    println!("cargo:warning=未找到 compiler-rt builtins，ARM 栈保护符号可能缺失");
+                // crtbegin_so.o 负责 .so 的初始化/析构入口
+                // （.init_array / .fini_array 的正确处理）。
+                // Rust 的链接命令**不会**自动加它们（那是 clang driver 的职责），
+                // 我们这里走手动 linker 参数 → 必须自己补。
+                //
+                // ⚠️ `cargo:rustc-link-arg` 只能把参数加到链接命令**末尾**，
+                //    而 crtbegin_so.o 理想上应在最前。对 .so 而言它主要标记
+                //    .init_array 的边界，缺失不会导致崩溃 ——
+                //    真正解决崩溃的是上面的「API 级目录 → 动态 libc.so」。
+                let crt_begin = api_dir.join("crtbegin_so.o");
+                let crt_end = api_dir.join("crtend_so.o");
+                if crt_begin.is_file() {
+                    println!("cargo:rustc-link-arg={}", crt_begin.display());
+                }
+                if crt_end.is_file() {
+                    println!("cargo:rustc-link-arg={}", crt_end.display());
                 }
             } else {
                 println!(
-                    "cargo:warning=NDK C++ 库目录不存在：{}",
-                    lib_dir.display()
+                    "cargo:warning=NDK API 级目录不存在：{}",
+                    api_dir.display()
                 );
+            }
+
+            // ── C++ 运行时（静态）──
+            //
+            // NDK 的 C++ 运行时拆成两个归档（LLVM 17+）：
+            //   libc++_static.a —— C++ 标准库本体（容器、算法、iostream…）
+            //   libc++abi.a    —— ABI 层（__cxa_throw / typeinfo / vtable /
+            //                      unwinder 胶水）
+            // 只链前者会缺一大批 undefined symbol（std::terminate、
+            // __cxa_throw、typeinfo for std::bad_alloc…）→ 两个都要链。
+            //
+            // ⚠️ 顺序：libc++_static 在前、libc++abi 在后 ——
+            //    静态链接对顺序敏感（引用者在前、被引用者在后）。
+            println!("cargo:rustc-link-lib=static=c++_static");
+            println!("cargo:rustc-link-lib=static=c++abi");
+
+            // ★ compiler-rt builtins：ARM 栈保护的配套符号。
+            //
+            // 现象：链接期报 "undefined symbol: __arm_za_disable"。
+            // 原因：NDK 的 clang 默认启用 ARM 的
+            // `-mstack-protector-guard=tz`（zone-based 栈保护），
+            // 被保护的函数会引用 `__arm_za_disable` 这类 helper，
+            // 它们定义在 compiler-rt 里（libclang_rt.builtins-aarch64-android.a），
+            // 而 Rust 的链接命令行不会自动加它。
+            //
+            // 路径里的 clang 版本号随 NDK 变 → 扫一遍取第一个匹配。
+            if let Some(rt) = find_compiler_rt(&ndk) {
+                println!(
+                    "cargo:rustc-link-search=native={}",
+                    rt.parent().unwrap().display()
+                );
+                println!("cargo:rustc-link-lib=static=clang_rt.builtins-aarch64-android");
+            } else {
+                println!("cargo:warning=未找到 compiler-rt builtins，ARM 栈保护符号可能缺失");
             }
         } else {
             println!("cargo:warning=找不到 ANDROID_NDK，无法链接 c++_static");

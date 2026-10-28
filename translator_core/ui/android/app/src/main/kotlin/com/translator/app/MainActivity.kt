@@ -75,7 +75,66 @@ class MainActivity : FlutterActivity() {
         // ⚠️ 必须在 super.onCreate 之前定方向：否则首帧会按系统当前方向
         //    渲染出来，手机横屏用户会看到「转一下才立正」的闪动。
         OrientationPolicy.apply(this)
+
+        // ★★ 必须在 super.onCreate()（= Flutter 引擎启动、Dart 开始执行）
+        //    之前、于**主线程**加载原生库。理由见 preloadNativeLibraries()。
+        preloadNativeLibraries()
+
         super.onCreate(savedInstanceState)
+    }
+
+    /**
+     * 在主线程预加载原生库（2026-10-28 真机闪退修复）。
+     *
+     * ## 崩溃现象
+     *
+     * 接入 Bergamot（链接了 Marian/sentencepiece 等 C++ 静态库）后，
+     * APP **一启动就闪退**：
+     * ```
+     * signal 11 (SIGSEGV), null pointer dereference
+     *   #00 libtranslator_core.so
+     *   #01 libtranslator_core.so
+     *   #02 linker64 __dl__ZN6soinfo17call_constructorsEv+752  ← 静态构造器
+     *   #03 linker64 do_dlopen
+     *   #05 libdl.so dlopen
+     *   #09 [anon:dart-code]                                     ← Dart isolate 线程
+     * ```
+     *
+     * ## 根因
+     *
+     * 崩在 **dlopen 时刻的 C++ 静态初始化器**里（`soinfo::call_constructors`），
+     * 而这次 dlopen 是由 **Dart 的 isolate 线程**发起的
+     * （Dart 侧 `DynamicLibrary.open('libtranslator_core.so')`）。
+     *
+     * Android 的每个线程都有独立的 **TLS（线程局部存储）**。
+     * Dart isolate 线程不是进程主线程，它的 TLS 尚未由运行时初始化，
+     * 此时执行 C++ 全局对象的构造器（marian/spdlog 的 logger 等会访问
+     * `thread_local`）就会解引用空指针 → SIGSEGV。
+     *
+     * 之前没暴露：Android 端此前只链 Rust 纯代码 + sherpa 的 .so，
+     * **libtranslator_core.so 里没有任何 C++ 静态构造器**，
+     * dlopen 阶段不会跑用户代码。
+     *
+     * ## 修法
+     *
+     * 在**主线程**（TLS 已正确初始化）且**Flutter 引擎启动之前**
+     * 先 `System.loadLibrary` 一次。之后 Dart 侧再
+     * `DynamicLibrary.open('libtranslator_core.so')` 时，动态链接器按
+     * soname 找到**已加载的同一个库**（同一 inode）→ 直接返回已有 handle，
+     * **不会重跑静态构造器** → 崩不了。
+     *
+     * （Dart 侧用的也是库名而非绝对路径，两边加载的是同一份。）
+     */
+    private fun preloadNativeLibraries() {
+        for (name in arrayOf("translator_core", "native_bridge")) {
+            try {
+                System.loadLibrary(name)
+                Log.i(TAG, "预加载 $name 成功（主线程）")
+            } catch (e: UnsatisfiedLinkError) {
+                // 不在这里崩 —— 让后续的 Dart 侧报错给出更完整的上下文
+                Log.e(TAG, "预加载 $name 失败", e)
+            }
+        }
     }
 
     /**
