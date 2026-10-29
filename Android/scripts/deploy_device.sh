@@ -8,15 +8,17 @@
 #
 # ## 模型推送
 # 模型不进 APK（162MB 会让安装极慢），用 adb push 送到应用**内部私有目录**：
-#   /data/data/com.translator.app.debug/files/models/
+#   /data/data/com.translator.app/files/models/
 #
 # 流程是「push 到 /data/local/tmp → run-as 拷进内部目录」，两个原因：
 #   1) 大文件直推 /sdcard 会 EOF 中断（Android 14 FUSE 限制）
 #   2) 直推 /sdcard 的文件属主是 shell，应用读不到（errno 13）
 # 详见下方「推送模型」段的完整说明。
 #
-# ⚠️ 包名带 `.debug` 后缀（build.gradle.kts 的 applicationIdSuffix），
-#    装机后包名不同，push 路径也要跟着变 —— 本脚本自动按实际包名推导。
+# ⚠️ 2026-10-29：debug 与 release **同包名**（com.translator.app，
+#    applicationIdSuffix 已删）—— 本脚本装 debug 会覆盖正式版，
+#    属预期（同一应用的不同渠道构建）；测试完想回正式版，
+#    重装 release APK 即可。
 #
 # ## 用法
 #   bash Android/scripts/deploy_device.sh            # 安装 + 推 ASR 模型
@@ -29,7 +31,7 @@ AND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT="$(cd "$AND_DIR/.." && pwd)"
 REPO="$ROOT/translator_core"
 ADB="${ADB:-D:/Android/Sdk/platform-tools/adb.exe}"
-PKG="com.translator.app.debug"
+PKG="com.translator.app"
 
 PUSH_MT=0
 PUSH_MODELS=1

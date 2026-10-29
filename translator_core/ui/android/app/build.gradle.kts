@@ -115,7 +115,13 @@ android {
             isMinifyEnabled = false
             isDebuggable = true
             signingConfig = signingConfigs.getByName("debug")
-            applicationIdSuffix = ".debug"
+            // ⚠️ 2026-10-29 用户实测「手机上装了两个 Translator」后
+            // **删除 applicationIdSuffix = ".debug"**：
+            // debug 与 release 同包名（com.translator.app）→ 装机永远只
+            // 有一个应用，测试版直接覆盖正式版（反之亦然），共享数据目录。
+            // 区分构建类型看版本串的渠道段（beta/release）即可，
+            // 不需要用包名分裂出来。签名不同会导致覆盖安装报
+            // INSTALL_FAILED_UPDATE_INCOMPATIBLE —— 先卸载再装，属预期。
             // 2026-10-28：不再追加 "-debug" 后缀 —— 渠道段（beta/snapshot）
             // 已表达发布阶段，再叠 -debug 会让版本串偏离用户规定格式。
         }

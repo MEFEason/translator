@@ -107,6 +107,18 @@ class ExportSaveAsActivity : Activity() {
         val content = pendingContent ?: ""
         try {
             contentResolver.openOutputStream(uri, "wt")?.use { out ->
+                // ★ 先写 UTF-8 BOM（EF BB BF），再写正文
+                //（2026-10-29 用户实测：导出的 txt 在手机上打开乱码）。
+                //
+                // 为什么：正文是 UTF-8，但**无 BOM 的 UTF-8 纯文本**在
+                // 中文环境的阅读器里会被按 GBK 猜（WPS、系统阅读器、
+                // 微信文件预览都有这行为）—— 这是手机「乱码」的根因，
+                // 不是写坏了编码。加 BOM 后这些阅读器都能正确识别 UTF-8。
+                //
+                // ⚠️ 只在 Android 加：Windows 端记事本/VSCode 对无 BOM
+                // UTF-8 识别良好，且 Windows 的 txt 关联可能被老工具
+                // 处理 BOM 时多吐一个可见字符，没必要跟着改。
+                out.write(byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()))
                 out.write(content.toByteArray(Charsets.UTF_8))
                 out.flush()
             } ?: throw IllegalStateException("openOutputStream 返回 null")
