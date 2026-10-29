@@ -95,3 +95,6 @@ translator_core/ui/devtools_options.yaml
 # 构建 release 前需在本地恢复这两处，详见 ui/android/app/build.gradle.kts 注释。
 translator_core/ui/android/keystore.properties
 *.keystore
+# Kotlin 编译器会话临时文件（误提交过一次，c8d92c1）
+.kotlin/
+*.salive
