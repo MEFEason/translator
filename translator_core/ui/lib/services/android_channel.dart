@@ -278,13 +278,25 @@ class AndroidChannel {
   }
 
   /// 打开字幕悬浮窗。返回 null=成功，非 null=失败原因。
-  Future<String?> showSubtitle() async {
+  ///
+  /// [sizeSp]：开窗时直接按这个字号渲染（设置页滑杆的当前值）。
+  Future<String?> showSubtitle({double sizeSp = 0}) async {
     if (!isAndroid) return '仅 Android 走原生字幕窗';
     try {
-      await _ch.invokeMethod<bool>('showSubtitle');
+      await _ch.invokeMethod<bool>('showSubtitle', {'sizeSp': sizeSp});
       return null;
     } on PlatformException catch (e) {
       return e.message ?? e.code;
+    }
+  }
+
+  /// 运行时改已开窗的字幕字号（2026-10-29 用户需求：滑杆实时生效）。
+  Future<void> setSubtitleFontSize(double sizeSp) async {
+    if (!isAndroid) return;
+    try {
+      await _ch.invokeMethod<bool>('setSubtitleFontSize', {'sizeSp': sizeSp});
+    } on PlatformException catch (e) {
+      debugPrint('[android] setSubtitleFontSize 失败: ${e.message}');
     }
   }
 

@@ -228,7 +228,15 @@ class MainActivity : FlutterActivity() {
                     reply.error("NO_OVERLAY_PERMISSION", "未授予悬浮窗权限", null)
                     return
                 }
-                SubtitleOverlayService.start(this)
+                // 字号（sp，0=服务侧默认）：开窗时把设置页当前值带过去
+                val sizeSp = (call.argument<Number>("sizeSp"))?.toFloat() ?: 0f
+                SubtitleOverlayService.start(this, sizeSp)
+                reply.success(true)
+            }
+            "setSubtitleFontSize" -> {
+                // 运行时改已开窗的字号（设置页滑杆 → 字幕窗实时生效）
+                val sizeSp = (call.argument<Number>("sizeSp"))?.toFloat() ?: 0f
+                SubtitleOverlayService.instance?.setFontSize(sizeSp)
                 reply.success(true)
             }
             "hideSubtitle" -> {

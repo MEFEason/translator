@@ -88,7 +88,17 @@ class SubtitleOverlayService : Service() {
             }
         }
 
-        fun start(context: Context) {
+        /**
+         * 字幕字号（sp）。0 = 用默认。
+         *
+         * 服务**还没起来**时 Dart 就设过字号 → 先存这里，
+         * onCreate 读取；服务已在跑 → 直接走 setFontSize() 实时更新。
+         */
+        @Volatile
+        var pendingSizeSp: Float = 0f
+
+        fun start(context: Context, sizeSp: Float = 0f) {
+            if (sizeSp > 0f) pendingSizeSp = sizeSp
             val i = Intent(context, SubtitleOverlayService::class.java)
             context.startForegroundService(i)
         }
@@ -131,8 +141,11 @@ class SubtitleOverlayService : Service() {
     private fun buildOverlay() {
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
-        val en = textView(17f, 0xE6FFFFFF.toInt())   // 英文行（原文）
-        val zh = textView(19f, Color.WHITE)          // 中文行（译文，略大更醒目）
+        // 字号来源：Dart 侧设置页滑杆（sp）。没传过就用默认 22，
+        // 两行比例 17:19 保持不变（译文行略大更醒目）。
+        val base = if (pendingSizeSp > 0f) pendingSizeSp else 22f
+        val en = textView(base, 0xE6FFFFFF.toInt())          // 英文行（原文）
+        val zh = textView(base * 1.12f, Color.WHITE)         // 中文行（译文）
         enView = en
         zhView = zh
 
@@ -208,6 +221,18 @@ class SubtitleOverlayService : Service() {
             en.setText(enText, streaming = partialSrc.isNotEmpty())
             zh.setText(zhText, streaming = partialZh.isNotEmpty())
         }
+    }
+
+    /**
+     * 运行时调整字幕字号（2026-10-29 用户需求：设置页滑杆实时生效）。
+     *
+     * 两行保持原版的比例关系（译文行略大更醒目）：
+     * 定版是 17/19 → 中文行 = 基准 × 1.12。
+     */
+    fun setFontSize(sp: Float) {
+        if (sp <= 0f) return
+        enView?.setTextSize(sp)
+        zhView?.setTextSize(sp * 1.12f)
     }
 
     private fun buildNotification(): Notification =
@@ -326,6 +351,23 @@ private class ScrollingTextLine(
      * @param streaming true = 流式识别中（partial），滚动位置应**跟随最新内容**，
      *                   避免每次更新都把内容弹回开头。
      */
+    /**
+     * 运行时改字号（2026-10-29）：重设 paint → 重测文本宽 →
+     * requestLayout 让 onMeasure 按新字号重算行高 → 偏移量夹回合法范围。
+     *
+     * ⚠️ 顺序：先改 textSize 再 measureText —— 反了测出来是旧字号的宽度。
+     */
+    fun setTextSize(sp: Float) {
+        val newSize = sp * resources.displayMetrics.scaledDensity
+        if (paint.textSize == newSize) return
+        paint.textSize = newSize
+        textWidth = paint.measureText(text)
+        requestLayout()   // 行高随字号变（onMeasure 用 fontMetrics）
+        // 偏移夹回 [0, 新的可滚范围]，防止超出后画面空白
+        offset = offset.coerceIn(0f, maxOf(0f, textWidth - width.toFloat()))
+        invalidate()
+    }
+
     fun setText(value: String, streaming: Boolean) {
         if (value == text) return
         val oldWidth = textWidth

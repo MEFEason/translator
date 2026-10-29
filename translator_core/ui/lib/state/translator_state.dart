@@ -589,6 +589,13 @@ class TranslatorState extends ChangeNotifier {
   }
 
   /// 设置正文字号（夹在 16~40）。
+  ///
+  /// 三处即时生效（2026-10-29 补齐 Android 端）：
+  /// - 主窗口字幕：watch 本字段重建，天然实时
+  /// - 桌面歌词窗：写共享文件，第二实例轮询读取
+  /// - **Android 悬浮字幕窗**：MethodChannel 推给 SubtitleOverlayService
+  ///   （旧实现漏了这条 —— 滑杆只改 UI 数字，原生窗字号写死 17/19sp）
+  /// 并持久化，重启后保持。
   void setSubtitleFontSize(double v) {
     final clamped = v.clamp(16.0, 40.0);
     if (_subtitleFontSize == clamped) return;
@@ -596,6 +603,18 @@ class TranslatorState extends ChangeNotifier {
     notifyListeners();
     // 字号变化要即时反映到歌词窗（歌词窗字号复用主窗口字号）
     _writeLyricsShared();
+    // Android：推给已打开的原生字幕窗（没开窗时是 no-op，
+    // 开窗时 showSubtitle 会带上当前值）
+    if (AndroidChannel.instance.isAndroid && _lyricsWindowEnabled) {
+      unawaited(AndroidChannel.instance.setSubtitleFontSize(clamped));
+    }
+    // 持久化不阻塞滑杆手感
+    unawaited(_persistSubtitleFontSize(clamped));
+  }
+
+  Future<void> _persistSubtitleFontSize(double v) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_kSubtitleFontKey, v);
   }
 
   /// 是否启用独立歌词窗（设置页开关）。
@@ -623,7 +642,8 @@ class TranslatorState extends ChangeNotifier {
           notifyListeners();
           return;
         }
-        final err = await AndroidChannel.instance.showSubtitle();
+        final err = await AndroidChannel.instance
+            .showSubtitle(sizeSp: _subtitleFontSize);
         if (err != null) {
           _sessionError = '字幕窗启动失败：$err';
           _lyricsWindowEnabled = false;
@@ -802,6 +822,9 @@ class TranslatorState extends ChangeNotifier {
 
   /// 持久化 key：关闭窗口行为
   static const _kCloseActionKey = 'close_action';
+
+  /// 持久化 key：字幕字号（sp）
+  static const _kSubtitleFontKey = 'subtitle_font_size';
   bool _floatingMode = false;
   double _subtitleFontSize = 22.0;
 
@@ -960,6 +983,11 @@ class TranslatorState extends ChangeNotifier {
     if (savedAction != null &&
         const {'ask', 'minimize', 'quit'}.contains(savedAction)) {
       _closeAction = savedAction;
+    }
+    // 字幕字号（用户上次调的）
+    final savedFont = prefs.getDouble(_kSubtitleFontKey);
+    if (savedFont != null && savedFont >= 16 && savedFont <= 40) {
+      _subtitleFontSize = savedFont;
     }
 
     // 2) 建会话（毫秒返回，不加载引擎）
