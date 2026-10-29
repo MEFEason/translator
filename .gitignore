@@ -89,3 +89,9 @@ translator_core/core/.rust-build-stamp
 translator_core/ui/.widget_preview/
 # Dart & Flutter DevTools 本地设置
 translator_core/ui/devtools_options.yaml
+
+# ── Android release 签名材料（绝不入库）──
+# keystore.properties 含密码；*.p12/*.keystore 是私钥本体（*.p12 已被上方规则拦）。
+# 构建 release 前需在本地恢复这两处，详见 ui/android/app/build.gradle.kts 注释。
+translator_core/ui/android/keystore.properties
+*.keystore

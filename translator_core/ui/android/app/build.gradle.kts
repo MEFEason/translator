@@ -77,6 +77,37 @@ android {
         // debug 由 SDK 自动签名（~/.android/debug.keystore）。
         // Android Studio 与 gradlew 用同一个，故两边产物一致。
         getByName("debug")
+
+        // ── release 自签名（2026-10-29）──
+        //
+        // ⚠️ keystore **不入库**（.gitignore 的 *.p12 生效），
+        // 路径与密码在本地 android/keystore.properties（同样不入库）。
+        // 换机器构建前先恢复这两个文件，否则 release 构建会
+        // 明确报错提示（见下方 error()）。
+        // 本项目不上架 Play，签名只为「同签名才能覆盖安装」的升级连续性。
+        // 将来若上架 Play，必须改用 Play App Signing 并撤销此密钥。
+        create("release") {
+            // ⚠️ 用顶部 import 的 Properties，不写 java.util.Properties 全限定名
+            //（本文件顶部注释的坑：`java` 前缀被 JavaPluginExtension 遮蔽）
+            val ksProps = Properties().apply {
+                val f = rootProject.file("keystore.properties")
+                if (f.exists()) f.inputStream().use { load(it) }
+            }
+            val path = ksProps.getProperty("storeFile")
+            if (path == null) {
+                // 不在配置期 error() —— Gradle **任何任务**都会评估这段
+                //（debug 构建也一样），直接抛会让 debug 全挂。
+                // 这里只警告 + 指向空配置，真正拦在产物上：
+                // 见下方 buildTypes.release 的校验。
+                logger.warn("缺 android/keystore.properties —— release 构建将失败（debug 不受影响）")
+            }
+            path?.let {
+                storeFile = rootProject.file(it)
+                storePassword = ksProps.getProperty("storePassword")
+                keyAlias = ksProps.getProperty("keyAlias")
+                keyPassword = ksProps.getProperty("keyPassword")
+            }
+        }
     }
 
     buildTypes {
@@ -95,7 +126,13 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // TODO: 配置正式签名（keystore 不入库）
+            // keystore.properties 缺失时 signingConfig 里 storeFile
+            // 为 null → AGP 报一个很难懂的错。提前给出明确指引。
+            if (signingConfigs.getByName("release").storeFile == null) {
+                error("release 构建需要签名：请恢复 android/keystore.properties " +
+                    "与其中的 keystore 文件（见本文件 signingConfigs.release 注释）")
+            }
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
