@@ -128,6 +128,36 @@ class AndroidChannel {
     }
   }
 
+  /// 运行时启停某一路采集（2026-10-28 用户需求「转写过程中实时切换采集源」）。
+  ///
+  /// [kind]：0 = 系统内放，1 = 麦克风（与 Kotlin 的 `KIND_*` 一致）。
+  /// [enabled]：true = 启用该路，false = 停用该路。
+  ///
+  /// 返回 true = 该路已处于期望状态；false = 失败（如缺投屏授权）。
+  ///
+  /// ## 为什么 Android 需要单独一条通道
+  ///
+  /// Android 的音频由 Kotlin 的 `AudioCaptureService` 生产
+  /// （AudioRecord → `sessionPushChunk` → Rust 队列），
+  /// Rust 侧的采集器是 `ExternalPushCapture`（start/stop 皆空实现）。
+  /// 所以真正要启停的是 **Kotlin 那边的 AudioRecord + 读线程**。
+  ///
+  /// 停掉的那一路，Rust 侧的接收端一直等不到数据 →
+  /// 该路不产生任何字幕（不影响另一路）。
+  Future<bool> setSourceEnabled(int kind, bool enabled) async {
+    if (!isAndroid) return false;
+    try {
+      final ok = await _ch.invokeMethod<bool>('setCaptureSourceEnabled', {
+        'kind': kind,
+        'enabled': enabled,
+      });
+      return ok ?? false;
+    } on PlatformException catch (e) {
+      debugPrint('[android] setCaptureSourceEnabled 失败: ${e.code} ${e.message}');
+      return false;
+    }
+  }
+
   /// 应用外部私有目录（模型放这里，adb push 直接可达）
   Future<String> externalFilesDir() async {
     if (!isAndroid) return '';

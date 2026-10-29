@@ -115,6 +115,13 @@ class AudioCaptureService : Service() {
         var degradeReason: String = ""
 
         /**
+         * 声源类型编号（与 Dart 侧 / Rust FFI `translator_session_set_source_enabled`
+         * 的 `kind` 参数**必须一致**）。
+         */
+        const val KIND_SYSTEM_AUDIO = 0
+        const val KIND_MICROPHONE = 1
+
+        /**
          * 启动采集服务（双路参数版）。
          *
          * @param sysIndex 内放路的 Rust 采集器下标（-1 = 不起内放）
@@ -421,12 +428,18 @@ class AudioCaptureService : Service() {
      */
     private fun startReadThread(sys: Boolean) {
         val name = if (sys) "audio-capture-sys" else "audio-capture-mic"
+        // ⚠️ running 标志必须在**线程体外**置位（2026-10-28 修复）。
+        //
+        // 原来它在**线程体内第一行**设置，而线程是异步启动的 →
+        // 调用方（startCapture / setSourceEnabled）返回时标志可能还是
+        // false → 随后的状态判定会误判成「这一路没起来」。
+        // 线程体自己也会置位（幂等），但线程外的这次才是**同步可见**的。
+        if (sys) sysRunning = true else micRunning = true
         val thread = thread(name = name, priority = Thread.MAX_PRIORITY) {
             val samplesPerChunk = SAMPLE_RATE * CHUNK_MS / 1000
             val buffer = FloatArray(samplesPerChunk)
             val recorder = if (sys) sysRecorder else micRecorder
             val index = if (sys) sysIndex else micIndex
-            if (sys) sysRunning = true else micRunning = true
 
             Log.i(TAG, "采集线程启动（${if (sys) "内放" else "麦克风"}），下标=$index，块长=${samplesPerChunk}样本")
 
@@ -471,21 +484,146 @@ class AudioCaptureService : Service() {
 
     /** 只停内放路（projection 被系统回收时用），麦克风继续。 */
     private fun stopSystemAudio() {
-        sysRunning = false
-        sysRecorder?.let {
-            try { if (it.recordingState == AudioRecord.RECORDSTATE_RECORDING) it.stop() } catch (_: Exception) {}
-            it.release()
-        }
-        sysRecorder = null
-        sysThread?.join(1000)
-        sysThread = null
-        if (micRunning) {
-            activeMode = "microphone"
+        stopSource(KIND_SYSTEM_AUDIO, keepServiceAlive = false)
+    }
+
+    /**
+     * 停掉一路采集（2026-10-28 新增：支撑运行时实时切换采集源）。
+     *
+     * @param kind 0 = 系统内放，1 = 麦克风
+     * @param keepServiceAlive true = 即使两路都停了也**不**退出服务。
+     *
+     *   运行时切换用 true：用户可能「全关再全开」，服务先留着，
+     *   否则 `stopSelf()` 之后服务已销毁，再打开某路就无处可去。
+     *   内部降级（如 projection 被回收）用 false —— 那时是真的没救了。
+     */
+    private fun stopSource(kind: Int, keepServiceAlive: Boolean) {
+        val label = if (kind == KIND_SYSTEM_AUDIO) "内放" else "麦克风"
+        if (kind == KIND_SYSTEM_AUDIO) {
+            sysRunning = false
+            sysRecorder?.let {
+                try { if (it.recordingState == AudioRecord.RECORDSTATE_RECORDING) it.stop() } catch (_: Exception) {}
+                it.release()
+            }
+            sysRecorder = null
+            sysThread?.join(1000)
+            sysThread = null
         } else {
-            activeMode = "idle"
+            micRunning = false
+            micRecorder?.let {
+                try { if (it.recordingState == AudioRecord.RECORDSTATE_RECORDING) it.stop() } catch (_: Exception) {}
+                it.release()
+            }
+            micRecorder = null
+            micThread?.join(1000)
+            micThread = null
+        }
+        Log.i(TAG, "已停止$label 路采集")
+        refreshActiveMode(keepServiceAlive)
+    }
+
+    /**
+     * 按当前两路状态刷新采集模式（activeMode）+ 通知。
+     *
+     * 单独抽出来是因为「运行时切换」与「内部降级」都要用到，
+     * 且判定口径必须一致 —— 否则会出现「明明麦克风在跑，
+     * 通知里却显示 idle」这种自相矛盾的状态。
+     */
+    private fun refreshActiveMode(keepServiceAlive: Boolean) {
+        val sysUp = sysRunning && sysRecorder != null
+        val micUp = micRunning && micRecorder != null
+        activeMode = when {
+            sysUp && micUp -> "dual"
+            sysUp -> "systemAudio"
+            micUp -> "microphone"
+            else -> "idle"
+        }
+        if (activeMode == "idle" && !keepServiceAlive) {
+            Log.i(TAG, "两路采集都已停止，服务退出")
             stopSelf()
         }
         updateNotification()
+    }
+
+    /**
+     * 运行时启停某一路采集（2026-10-28 用户需求「转写过程中实时切换采集源」）。
+     *
+     * @param kind 0 = 系统内放，1 = 麦克风
+     * @param enabled true = 启用该路，false = 停用该路
+     * @return true = 操作成功（该路确实处于期望状态）
+     *
+     * ## 为什么可以在运行中切换
+     *
+     * 两路采集本来就是**各自独立**的 AudioRecord + 读线程
+     * （见本文件「双路并行采集」段），互不拖累。
+     * 停一路 = 停它的 recorder + join 它的读线程；
+     * 起一路 = 新建 recorder + 新建读线程。
+     *
+     * ⚠️ 读线程里 `recorder` 是**闭包捕获**的局部变量，
+     *    所以重启某路**必须新建读线程**（旧线程捕获的是已 release
+     *    的 recorder），不能复用。
+     *
+     * ## 与 Rust 侧的关系
+     *
+     * Rust 侧的采集器（`session.capture`）**始终存在**，
+     * 音频经 `sessionPushChunk` 按下标推入对应通道。
+     * 某路不推 → 该路接收端一直等不到数据 → 该路不产生字幕。
+     * 所以这里只需管住 Kotlin 的生产者，**Rust 侧无需改动**
+     * （Android 的 Rust 采集器是 `ExternalPushCapture`，start/stop 皆空实现）。
+     */
+    fun setSourceEnabled(kind: Int, enabled: Boolean): Boolean {
+        val isSys = kind == KIND_SYSTEM_AUDIO
+        val label = if (isSys) "内放" else "麦克风"
+
+        // 该路在本会话里根本没有采集器（下标无效）→ 无从启停
+        val index = if (isSys) sysIndex else micIndex
+        if (index < 0) {
+            Log.w(TAG, "切换$label 路失败：本会话没有该路的采集器")
+            return false
+        }
+
+        if (!enabled) {
+            stopSource(kind, keepServiceAlive = true)
+            return true
+        }
+
+        // 已经是开着的 → 幂等返回成功
+        val alreadyUp = if (isSys) sysRunning && sysRecorder != null
+        else micRunning && micRecorder != null
+        if (alreadyUp) return true
+
+        val ok = if (isSys) {
+            if (mediaProjection == null) {
+                // 用户从未授权投屏（或已被回收）→ 无法开内放。
+                // 如实回报，不静默失败（DESIGN §2.5.2）。
+                AudioCaptureService.degradeReason = "内放需要投屏授权，请重新授权后再开启"
+                Log.w(TAG, "切换内放路失败：缺少 MediaProjection 授权")
+                false
+            } else {
+                startSystemAudioCapture()
+            }
+        } else {
+            startMicCapture()
+        }
+
+        if (!ok) {
+            if (isSys) {
+                AudioCaptureService.degradeReason = "内放采集不可用（会议声音采不到）"
+            } else {
+                Log.e(TAG, "切换麦克风路失败：AudioRecord 起不来")
+                if (AudioCaptureService.degradeReason.isEmpty()) {
+                    AudioCaptureService.degradeReason = "麦克风采集启动失败"
+                }
+            }
+            refreshActiveMode(keepServiceAlive = true)
+            return false
+        }
+
+        // 起读线程（必须新建：旧线程捕获的是已 release 的 recorder）
+        startReadThread(sys = isSys)
+        Log.i(TAG, "已启用$label 路采集")
+        refreshActiveMode(keepServiceAlive = true)
+        return true
     }
 
     /**

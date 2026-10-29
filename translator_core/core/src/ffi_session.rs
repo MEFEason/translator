@@ -558,6 +558,79 @@ pub unsafe extern "C" fn translator_session_start(handle: *mut c_void) -> i32 {
     })
 }
 
+/// 运行时启停某一路采集（2026-10-28 用户需求「转写过程中实时切换采集源」）。
+///
+/// `kind`：0 = 系统内放，1 = 麦克风。
+/// `enabled`：1 = 启用，0 = 停用。
+///
+/// ## 为什么按**声源类型**而不是下标
+///
+/// `session.capture` 只含**创建成功**的采集器 —— 某路建不起来时
+/// （无麦克风 / 投屏未授权），列表里就少一个，位置下标与 UI 的
+/// kind 完全对不上。用类型匹配永远正确（与 `capture_index` 同理）。
+///
+/// ## 为什么停用后还能再启用
+///
+/// `CaptureHandle::start/stop` 支持重复调用：
+/// - `start()` 每次都**重新打开音频设备**（WASAPI loopback / mic），
+///   且用的还是内部那个 `chunk_tx` —— 接收端已交给引擎，
+///   故重启后音频**继续流向同一个引擎**，字幕时间轴不断。
+/// - `stop()` 停采集线程并 join。
+///
+/// ## 平台差异
+///
+/// - **桌面端**：本函数直接生效（数据由 Rust 自己的采集线程产出）。
+/// - **Android**：采集数据由 Kotlin 的 `AudioCaptureService` 推入
+///   （Rust 侧是 `ExternalPushCapture`，其 start/stop 为空实现）。
+///   故 Android 上本函数是**无害的 no-op**，真正的启停在 Kotlin 侧
+///   （见 `AudioCaptureService.setSourceEnabled`）。
+///   Dart 侧按平台分派，两端行为对用户一致。
+///
+/// # Safety
+/// `handle` 必须来自 `translator_session_create`。
+#[no_mangle]
+pub unsafe extern "C" fn translator_session_set_source_enabled(
+    handle: *mut c_void,
+    kind: i32,
+    enabled: i32,
+) -> i32 {
+    ffi_guard!({
+        if handle.is_null() {
+            return FfiError::InvalidArg as i32;
+        }
+        let want = match kind {
+            0 => crate::config::CaptureSource::SystemAudio,
+            1 => crate::config::CaptureSource::Microphone,
+            _ => return FfiError::InvalidArg as i32,
+        };
+        let session = &*(handle as *const FfiSession);
+        let cap = match session.capture.lock() {
+            Ok(c) => c,
+            Err(_) => return FfiError::Internal as i32,
+        };
+        let mut hit = false;
+        for c in cap.iter() {
+            if c.source() != want {
+                continue;
+            }
+            hit = true;
+            let r = if enabled != 0 { c.start() } else { c.stop() };
+            if let Err(e) = r {
+                eprintln!(
+                    "[translator_core] 切换声源失败（{want:?}，enabled={enabled}）：{e}"
+                );
+                return FfiError::NoAudioDevice as i32;
+            }
+        }
+        if !hit {
+            // 本会话没有该类型的采集器（创建时就失败了）
+            eprintln!("[translator_core] 切换声源失败：会话内没有 {want:?} 采集器");
+            return FfiError::InvalidArg as i32;
+        }
+        FfiError::Ok as i32
+    })
+}
+
 /// 暂停 / 恢复转写。
 ///
 /// `paused`：1 = 暂停，0 = 恢复。

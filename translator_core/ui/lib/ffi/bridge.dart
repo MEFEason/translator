@@ -394,6 +394,7 @@ class Bridge {
   late final _TranscriptDirNative _transcriptDir;
   late final _SessionCaptureCapabilityNative _sessionCaptureCapability;
   late final _SessionCaptureIndexNative _sessionCaptureIndex;
+  late final _SessionSetSourceEnabledNative _sessionSetSourceEnabled;
 
   late final _FreeStrNative _freeStrFn;
 
@@ -526,6 +527,10 @@ class Bridge {
     _sessionCaptureIndex = _lib.lookupFunction<
         Int32 Function(Pointer<Void>, Int32),
         int Function(Pointer<Void>, int)>('translator_session_capture_index');
+    _sessionSetSourceEnabled = _lib.lookupFunction<
+        Int32 Function(Pointer<Void>, Int32, Int32),
+        int Function(Pointer<Void>, int, int)>(
+        'translator_session_set_source_enabled');
   }
 
   void _freeStr(Pointer<Int8> p) => _freeStrFn(p);
@@ -766,6 +771,26 @@ class Bridge {
   int sessionPause(bool paused) {
     if (_session == nullptr) return 7;
     return _sessionPause(_session, paused ? 1 : 0);
+  }
+
+  /// 运行时启停某一路采集（2026-10-28 用户需求「转写过程中实时切换采集源」）。
+  ///
+  /// [kind]：0 = 系统内放，1 = 麦克风。
+  /// [enabled]：true = 启用该路，false = 停用该路。
+  ///
+  /// ## 平台差异
+  ///
+  /// - **桌面端**：直接生效 —— Rust 侧的采集器被停/启，
+  ///   音频仍流向同一个引擎，字幕时间轴不断。
+  /// - **Android**：Rust 侧是 `ExternalPushCapture`（空实现），
+  ///   真正的生产者是 Kotlin 的 `AudioCaptureService`，
+  ///   故 Android 走 `AndroidChannel.setSourceEnabled`。
+  ///   Dart 侧（TranslatorState）按平台分派，用户看到的行为一致。
+  ///
+  /// 返回 0 = 成功。
+  int sessionSetSourceEnabled(int kind, bool enabled) {
+    if (_session == nullptr) return 7; // InvalidArg
+    return _sessionSetSourceEnabled(_session, kind, enabled ? 1 : 0);
   }
 
   /// 停止会话（同步冲刷最后一句的译文）。
@@ -1081,3 +1106,10 @@ typedef _TranscriptStatsNative = int Function(
 typedef _TranscriptDirNative = Pointer<Int8> Function();
 typedef _SessionCaptureCapabilityNative = Pointer<Int8> Function(Pointer<Void>);
 typedef _SessionCaptureIndexNative = int Function(Pointer<Void>, int);
+
+/// `translator_session_set_source_enabled` 的原生签名。
+///
+/// [kind]：0 = 系统内放，1 = 麦克风（与 Kotlin 侧 KIND_* 一致）。
+/// 返回 0 = 成功，7 = 参数非法，2 = 音频设备错误。
+typedef _SessionSetSourceEnabledNative = int Function(
+    Pointer<Void>, int, int);

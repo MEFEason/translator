@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:provider/provider.dart';
 
 import '../services/responsive.dart';
+import '../services/model_paths.dart';
 import '../state/translator_state.dart';
 
 /// 词库管理页。
@@ -52,7 +53,9 @@ class _GlossaryPageState extends State<GlossaryPage> {
       if (!dir.existsSync()) dir.createSync(recursive: true);
       final dst = File(p.join(dir.path, 'example-glossary.tsv'));
       // 示例文件源：安装目录 models/glossary 下（随包分发）
-      final models = state.bridge.discoverModels();
+      // ⚠️ 用 resolveModelPaths 而不是 bridge.discoverModels()：
+      //    后者在 Android 上必然返回空（Rust 只探 exe 相邻目录）。
+      final models = resolveModelPaths(state);
       final src = models.root.isEmpty
           ? null
           : File(p.join(models.root, 'glossary', 'example-glossary.tsv'));

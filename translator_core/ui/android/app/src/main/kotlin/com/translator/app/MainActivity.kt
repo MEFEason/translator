@@ -162,6 +162,7 @@ class MainActivity : FlutterActivity() {
         when (call.method) {
             "startCapture" -> startCapture(call, reply)
             "stopCapture" -> stopCapture(reply)
+            "setCaptureSourceEnabled" -> setCaptureSourceEnabled(call, reply)
             "captureStatus" -> reply.success(
                 mapOf(
                     "mode" to AudioCaptureService.activeMode,
@@ -407,6 +408,38 @@ class MainActivity : FlutterActivity() {
                 Log.w(TAG, "停止采集异常（仍回包）", e)
             }
             Handler(Looper.getMainLooper()).post { reply.success(0) }
+        }
+    }
+
+    /**
+     * 运行时启停某一路采集（2026-10-28 用户需求「转写过程中实时切换采集源」）。
+     *
+     * 参数：
+     * - `kind`：0 = 系统内放，1 = 麦克风（与 Dart / Rust 侧一致）
+     * - `enabled`：true = 启用，false = 停用
+     *
+     * 返回 true = 该路已处于期望状态；false = 失败（如缺投屏授权）。
+     *
+     * ⚠️ 必须在**后台线程**执行：停路要 join 读线程（最多 1s），
+     *    在主线程做会卡住 UI（Android 上主线程卡顿直接 ANR）。
+     */
+    private fun setCaptureSourceEnabled(call: MethodCall, reply: MethodChannel.Result) {
+        val kind = (call.argument<Number>("kind"))?.toInt() ?: -1
+        val enabled = call.argument<Boolean>("enabled") ?: false
+        if (kind != AudioCaptureService.KIND_SYSTEM_AUDIO &&
+            kind != AudioCaptureService.KIND_MICROPHONE
+        ) {
+            reply.error("BAD_KIND", "未知的声源类型：$kind", null)
+            return
+        }
+        thread(name = "capture-toggle-$kind") {
+            var ok = false
+            try {
+                ok = AudioCaptureService.instance?.setSourceEnabled(kind, enabled) ?: false
+            } catch (e: Exception) {
+                Log.w(TAG, "切换采集源异常（仍回包）", e)
+            }
+            Handler(Looper.getMainLooper()).post { reply.success(ok) }
         }
     }
 

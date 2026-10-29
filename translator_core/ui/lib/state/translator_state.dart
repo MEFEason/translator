@@ -155,6 +155,21 @@ class TranslatorState extends ChangeNotifier {
   /// 会话错误详情（模型缺失 / 词库语法错 / 采集不可用）
   String _sessionError = '';
 
+  /// **探测到的模型目录**（bootstrap 时填充）。
+  ///
+  /// ## 为什么必须存在状态里
+  ///
+  /// 以前模型页直接调 `bridge.discoverModels()`（Rust 侧探测），
+  /// 而 Rust 的 `discover_model_layout` 只探「exe 相邻目录」与
+  /// 「cwd/models」—— **Android 上 current_exe 是 .so 所在目录**
+  /// （app/lib/arm64），那三处全都不存在 → 必然返回空 →
+  /// 模型页一片空白（2026-10-28 用户反馈「模型页面还是显示里面没东西」）。
+  ///
+  /// Android 的真实落点是应用私有目录
+  /// `<internalFilesDir>/models/{asr,mt,offline,glossary}`，
+  /// bootstrap 里已用 `_probeAndroidModels` 探到 —— 存在这里给 UI 复用。
+  ModelPaths models = const ModelPaths('', '', '');
+
   /// 是否已 bootstrap 完成
   bool _bootstrapped = false;
 
@@ -398,6 +413,21 @@ class TranslatorState extends ChangeNotifier {
   }
 
   /// 切换某个声源的启用状态。至少保留一个 —— 全关等于没得转。
+  ///
+  /// ## 运行中也要能实时切换（2026-10-28 用户需求）
+  ///
+  /// 旧实现只改了 `_sources` 这个 **UI 状态集合**，而实际采集器
+  /// 是**会话创建时**按 `cfg.sources` 定死的 → 用户在转写中点了开关，
+  /// 界面变了但声音没变，必须先停止再开始，体验上就是「不能实时切换」。
+  ///
+  /// 现在：
+  /// - **运行中** → 调平台接口真正启停那一路（Android 走 Kotlin 的
+  ///   `AudioCaptureService`，桌面端走 Rust 的
+  ///   `translator_session_set_source_enabled`）
+  /// - **未运行** → 只改状态集合，下次 `start` 时按新集合起采集
+  ///
+  /// 停掉的那一路：Rust 侧的接收端一直等不到数据 → 该路不产生字幕，
+  /// 另一路不受影响（两路采集器本来就是各自独立的）。
   void toggleSource(String kind, bool on) {
     if (on) {
       _sources.add(kind);
@@ -405,6 +435,38 @@ class TranslatorState extends ChangeNotifier {
       if (_sources.length <= 1) return; // 不允许全关
       _sources.remove(kind);
     }
+    notifyListeners();
+    if (_running) {
+      unawaited(_applySourceToggle(kind, on));
+    }
+  }
+
+  /// 把声源开关真正落到采集器上（运行中切换用）。
+  ///
+  /// 失败时**回滚 UI 状态** —— 否则界面显示与实际采集不一致，
+  /// 用户会以为在录其实没录（比报错更糟）。
+  Future<void> _applySourceToggle(String kind, bool on) async {
+    const kindSystemAudio = 0;
+    const kindMicrophone = 1;
+    final k = kind == 'systemAudio' ? kindSystemAudio : kindMicrophone;
+    var ok = false;
+    if (AndroidChannel.instance.isAndroid) {
+      ok = await AndroidChannel.instance.setSourceEnabled(k, on);
+    } else {
+      final rc = _bridge.sessionSetSourceEnabled(k, on);
+      ok = rc == 0;
+      if (!ok) debugPrint('[transcribe] 桌面端切换采集源失败（rc=$rc）');
+    }
+    debugPrint('[transcribe] 采集源实时切换：$kind → ${on ? "开" : "关"}（ok=$ok）');
+    if (ok) return;
+
+    // 回滚 UI 状态，保持与实际采集一致
+    if (on) {
+      _sources.remove(kind);
+    } else {
+      _sources.add(kind);
+    }
+    _sessionError = '切换采集源失败（$kind）—— 请检查权限或设备占用';
     notifyListeners();
   }
 
@@ -950,7 +1012,6 @@ class TranslatorState extends ChangeNotifier {
     // 而 Android 上 current_exe 是 .so 所在目录（app/lib/arm64），
     // 探不到 —— 改用应用外部私有目录（adb push 目标）：
     //   <externalFilesDir>/models/{asr,mt,offline,glossary}
-    ModelPaths models;
     if (AndroidChannel.instance.isAndroid) {
       // ── 模型内置化（2026-10-28 任务 #17）──
       // 模型随 APK 打进 assets，首启由 Kotlin 解压到 filesDir/models。

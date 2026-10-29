@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 import 'package:provider/provider.dart';
 
 import '../ffi/bridge.dart';
+import '../services/model_paths.dart';
 import '../services/responsive.dart';
 import '../state/translator_state.dart';
 
@@ -33,15 +34,41 @@ class _ModelPageState extends State<ModelPage> {
   /// 各模型目录的实际占用（key = 目录路径）
   final Map<String, int> _bytes = {};
 
+  /// 上次已加载的路径指纹 —— 用来识别「路径变了，要重算占用」
+  String _loadedKey = '';
+
   @override
   void initState() {
     super.initState();
     Future.microtask(_load);
   }
 
-  Future<void> _load() async {
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // ⚠️ 必须 watch：state.models 可能在**页面打开之后**才被 bootstrap
+    // 填上（Android 上还要等 Kotlin 把模型从 assets 解压到私有目录）。
+    // 不 watch 的话，页面会永远停在「空路径」状态。
+    final state = context.watch<TranslatorState>();
+    final paths = resolveModelPaths(state);
+    final key = _keyOf(paths);
+    if (key != _loadedKey) {
+      _loadedKey = key;
+      Future.microtask(() => _load(paths));
+    }
+  }
+
+  static String _keyOf(ModelPaths p) => '${p.asr}|${p.mt}|${p.root}';
+
+  Future<void> _load([ModelPaths? arg]) async {
     final state = context.read<TranslatorState>();
-    final paths = state.bridge.discoverModels();
+    // ⚠️ Android 上不能用 bridge.discoverModels()：Rust 侧只探
+    // 「exe 相邻目录」与「cwd/models」，而 Android 的 current_exe 是
+    // .so 所在目录（app/lib/arm64）→ 必然探不到 → 页面全空。
+    // 正确做法：复用 TranslatorState 已探测好的 models
+    //（Android 走 _probeAndroidModels，内部私有目录优先）。
+    final paths = arg ?? resolveModelPaths(state);
+    _loadedKey = _keyOf(paths);
     if (!mounted) return;
     setState(() => _paths = paths);
     // 异步计算各目录占用（大目录遍历有耗时，不能卡首帧）
@@ -92,6 +119,15 @@ class _ModelPageState extends State<ModelPage> {
   Future<void> _openFolder() async {
     final root = _paths.root;
     if (root.isEmpty) return;
+    if (Platform.isAndroid) {
+      // 私有目录外部不可见，无从打开（按钮在 Android 上本就不显示，
+      // 这里只是防止将来被别处调用）。
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('模型随应用内置，无需手动打开')),
+      );
+      return;
+    }
     try {
       await Process.start('explorer.exe', [root]);
     } catch (_) {
@@ -147,11 +183,17 @@ class _ModelPageState extends State<ModelPage> {
               builtin: true,
             ),
             const SizedBox(height: 16),
-            FilledButton.icon(
-              onPressed: _paths.root.isEmpty ? null : _openFolder,
-              icon: const Icon(Icons.folder_open),
-              label: const Text('打开模型文件夹'),
-            ),
+            // ⚠️ Android 上不显示「打开模型文件夹」：
+            //    模型在应用私有目录（/data/data/<pkg>/files/models），
+            //    第三方文件管理器**根本看不到**（Android 11+ 还禁止
+            //    应用访问其它应用的私有目录）；`explorer.exe` 更是
+            //    Windows 专属。给一个必然失败/无意义的按钮不如不给。
+            if (!Platform.isAndroid)
+              FilledButton.icon(
+                onPressed: _paths.root.isEmpty ? null : _openFolder,
+                icon: const Icon(Icons.folder_open),
+                label: const Text('打开模型文件夹'),
+              ),
             const SizedBox(height: 16),
             Card(
               margin: EdgeInsets.zero,
